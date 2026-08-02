@@ -77,6 +77,15 @@ Keep this channel private: every ordinary message from the configured user is a
 Codex task. Slash-command responses remain ephemeral; ordinary-message
 responses are visible in the allowed channel.
 
+While a task is running, its initial Bot response is edited in place with safe
+progress: a readable reasoning summary, plan updates, and high-level command or
+file-change activity. Raw reasoning text and command output are not posted to
+Discord. When Codex needs approval, that same message becomes an approval card
+with **Allow once**, **Allow for this session**, and **Decline** buttons. Only
+the configured Discord user in the configured channel can answer those buttons.
+The service continues to run in the `workspace-write` sandbox; a button never
+grants `danger-full-access`.
+
 Responses are ephemeral by default so code output does not flood the channel.
 The bot token, prompts and Codex output must still be treated as private to the
 allowed Discord users.

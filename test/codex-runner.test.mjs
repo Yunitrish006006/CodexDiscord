@@ -1,23 +1,55 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resumeArgs, sessionIdFromEvent, startArgs, validateModel, validatePrompt } from "../src/codex-runner.mjs";
+import { approvalResponse, finalAgentMessage, threadResumeParams, threadStartParams, turnStartParams, validateModel, validatePrompt } from "../src/codex-runner.mjs";
 
-const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+test("Codex App Server sessions always confine writes to the selected workspace", () => {
+  const start = threadStartParams({ workspace: "/srv/nexus", model: "gpt-5.6-terra" });
+  assert.deepEqual(start, {
+    cwd: "/srv/nexus",
+    runtimeWorkspaceRoots: ["/srv/nexus"],
+    approvalPolicy: "on-request",
+    approvalsReviewer: "user",
+    sandbox: "workspace-write",
+    model: "gpt-5.6-terra"
+  });
+  assert.equal(JSON.stringify(start).includes("danger-full-access"), false);
+  assert.deepEqual(threadResumeParams({ threadId: "thread-123", workspace: "/srv/nexus" }).runtimeWorkspaceRoots, ["/srv/nexus"]);
 
-test("Codex commands always use the workspace-write sandbox and never a shell", () => {
-  const args = startArgs({ workspace: "/srv/nexus", prompt: "Run tests", outputFile: "/tmp/result.txt" });
-  assert.deepEqual(args.slice(0, 7), ["exec", "--json", "--sandbox", "workspace-write", "--cd", "/srv/nexus", "--output-last-message"]);
-  assert.equal(args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
-  assert.equal(startArgs({ workspace: "/home/thomas/workspace", prompt: "Inspect every module", outputFile: "/tmp/result.txt", skipGitRepoCheck: true }).includes("--skip-git-repo-check"), true);
-  assert.deepEqual(resumeArgs({ sessionId, prompt: "Continue", outputFile: "/tmp/result.txt" }).slice(0, 5), ["exec", "resume", "--json", "--output-last-message", "/tmp/result.txt"]);
-  assert.deepEqual(startArgs({ workspace: "/srv/nexus", prompt: "Run tests", outputFile: "/tmp/result.txt", model: "gpt-5.6-terra" }).slice(-3), ["--model", "gpt-5.6-terra", "Run tests"]);
-  assert.deepEqual(resumeArgs({ sessionId, prompt: "Continue", outputFile: "/tmp/result.txt", model: "gpt-5.6-terra" }).slice(-4), ["--model", "gpt-5.6-terra", sessionId, "Continue"]);
+  const turn = turnStartParams({ threadId: "thread-123", workspace: "/srv/nexus", prompt: "Run tests" });
+  assert.deepEqual(turn.sandboxPolicy, {
+    type: "workspaceWrite",
+    writableRoots: ["/srv/nexus"],
+    networkAccess: false,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false
+  });
+  assert.deepEqual(turn.input, [{ type: "text", text: "Run tests" }]);
 });
 
-test("session IDs are extracted only from valid Codex JSON events", () => {
-  assert.equal(sessionIdFromEvent({ thread_id: sessionId }), sessionId);
-  assert.equal(sessionIdFromEvent({ data: { session: { id: sessionId } } }), sessionId);
-  assert.equal(sessionIdFromEvent({ thread_id: "not-a-session" }), null);
+test("approval responses are scoped and never auto-grant unrequested permissions", () => {
+  const command = { kind: "command", availableDecisions: ["accept", "decline"] };
+  assert.deepEqual(approvalResponse(command, "allow"), { decision: "accept" });
+  assert.throws(() => approvalResponse(command, "allow-session"), /not available/);
+  assert.deepEqual(approvalResponse({ kind: "command", availableDecisions: ["accept", "cancel"] }, "decline"), { decision: "cancel" });
+  assert.deepEqual(approvalResponse({ kind: "file-change" }, "decline"), { decision: "decline" });
+
+  const permissions = {
+    kind: "permissions",
+    permissions: { network: { host: ["example.com"] }, fileSystem: null }
+  };
+  assert.deepEqual(approvalResponse(permissions, "allow"), {
+    permissions: { network: { host: ["example.com"] } },
+    scope: "turn"
+  });
+  assert.deepEqual(approvalResponse(permissions, "allow-session"), {
+    permissions: { network: { host: ["example.com"] } },
+    scope: "session"
+  });
+  assert.deepEqual(approvalResponse(permissions, "decline"), { permissions: {}, scope: "turn" });
+});
+
+test("final messages and user input are validated before reaching Codex", () => {
+  assert.equal(finalAgentMessage({ items: [{ type: "agentMessage", text: " first " }, { type: "agentMessage", text: " final " }] }), "final");
   assert.equal(validatePrompt("  Update the tests  "), "Update the tests");
   assert.throws(() => validatePrompt(""), /cannot be empty/);
   assert.equal(validateModel("gpt-5.6-terra"), "gpt-5.6-terra");
