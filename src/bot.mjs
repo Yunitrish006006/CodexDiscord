@@ -1,5 +1,6 @@
 import { Client, Events, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
 import { isAllowedInteraction, isAllowedMessage } from "./config.mjs";
+import { validateModel } from "./codex-runner.mjs";
 import { conversationKey, sessionKey } from "./session-store.mjs";
 
 const MAX_DISCORD_MESSAGE = 1_850;
@@ -37,7 +38,14 @@ function commandDefinition(workspaceNames) {
     .addSubcommand((subcommand) => subcommand
       .setName("use")
       .setDescription("Use this workspace for normal messages in this channel")
-      .addStringOption(workspaceOption));
+      .addStringOption(workspaceOption))
+    .addSubcommand((subcommand) => subcommand
+      .setName("model")
+      .setDescription("Select the Codex model for normal messages in this channel")
+      .addStringOption((option) => option
+        .setName("name")
+        .setDescription('Model ID, or "default" to use the local Codex default')
+        .setRequired(true)));
 }
 
 function splitMessage(message) {
@@ -73,7 +81,7 @@ function resultPrefix(result) {
   return result.exitCode === 0 ? "" : `Codex exited with status ${result.exitCode ?? "unknown"}.\n\n`;
 }
 
-async function runTask({ config, runner, sessions, userId, channelId, workspaceName, task }) {
+async function runTask({ config, runner, sessions, userId, channelId, workspaceName, task, model = null }) {
   const workspaceConfig = config.workspaces.get(workspaceName);
   if (!workspaceConfig) throw new Error("That workspace is not configured");
   const key = sessionKey({ userId, channelId, workspace: workspaceName });
@@ -82,6 +90,7 @@ async function runTask({ config, runner, sessions, userId, channelId, workspaceN
     key,
     workspace: workspaceConfig.path,
     prompt: task,
+    model,
     skipGitRepoCheck: workspaceConfig.allowNonGit,
     resumeSessionId: saved?.sessionId ?? null,
     onSessionId: async (sessionId) => {
@@ -117,6 +126,21 @@ export async function startBot({ config, runner, sessions }) {
       return;
     }
     const action = interaction.options.getSubcommand();
+    const conversation = conversationKey({ userId: interaction.user.id, channelId: interaction.channelId });
+    if (action === "model") {
+      try {
+        const model = validateModel(interaction.options.getString("name", true));
+        await sessions.setActiveModel(conversation, model);
+        await interaction.reply({
+          content: model ? `Normal messages in this channel will now use **${model}**.` : "Normal messages in this channel will now use the local Codex default model.",
+          ephemeral: true,
+          allowedMentions: { parse: [] }
+        });
+      } catch (error) {
+        await interaction.reply({ content: `Invalid model: ${error.message}`, ephemeral: true, allowedMentions: { parse: [] } });
+      }
+      return;
+    }
     const workspaceName = interaction.options.getString("workspace", true);
     const workspaceConfig = config.workspaces.get(workspaceName);
     if (!workspaceConfig) {
@@ -124,12 +148,12 @@ export async function startBot({ config, runner, sessions }) {
       return;
     }
     const key = sessionKey({ userId: interaction.user.id, channelId: interaction.channelId, workspace: workspaceName });
-    const conversation = conversationKey({ userId: interaction.user.id, channelId: interaction.channelId });
     try {
       if (action === "status") {
         const saved = sessions.get(key);
         const state = runner.isRunning(key) ? "running" : saved ? "ready to resume" : "new";
-        await interaction.reply({ content: `Codex session for **${workspaceName}**: ${state}.`, ephemeral: true, allowedMentions: { parse: [] } });
+        const model = sessions.activeModel(conversation) ?? "local default";
+        await interaction.reply({ content: `Codex session for **${workspaceName}**: ${state}. Model: **${model}**.`, ephemeral: true, allowedMentions: { parse: [] } });
         return;
       }
       if (action === "cancel") {
@@ -153,7 +177,8 @@ export async function startBot({ config, runner, sessions }) {
       await interaction.deferReply({ ephemeral: true });
       await sessions.setActiveWorkspace(conversation, workspaceName);
       const { result } = await runTask({
-        config, runner, sessions, userId: interaction.user.id, channelId: interaction.channelId, workspaceName, task
+        config, runner, sessions, userId: interaction.user.id, channelId: interaction.channelId, workspaceName, task,
+        model: sessions.activeModel(conversation)
       });
       await replyChunks(interaction, `${resultPrefix(result)}${result.message}`);
     } catch (error) {
@@ -171,15 +196,17 @@ export async function startBot({ config, runner, sessions }) {
       await message.reply({ content: "No active workspace is configured. Use `/codex use` once.", allowedMentions: { parse: [] } });
       return;
     }
+    const model = sessions.activeModel(conversation);
     const key = sessionKey({ userId: message.author.id, channelId: message.channelId, workspace: workspaceName });
     if (runner.isRunning(key)) {
       await message.reply({ content: "Codex is still working on the previous message. Use `/codex cancel` if needed.", allowedMentions: { parse: [] } });
       return;
     }
-    const status = await message.reply({ content: `Codex is working in **${workspaceName}**…`, allowedMentions: { parse: [] } });
+    const modelLabel = model ?? "local default";
+    const status = await message.reply({ content: `Codex is working in **${workspaceName}** with **${modelLabel}**…`, allowedMentions: { parse: [] } });
     try {
       const { result } = await runTask({
-        config, runner, sessions, userId: message.author.id, channelId: message.channelId, workspaceName, task: message.content
+        config, runner, sessions, userId: message.author.id, channelId: message.channelId, workspaceName, task: message.content, model
       });
       await messageChunks(message, status, `${resultPrefix(result)}${result.message}`);
     } catch (error) {

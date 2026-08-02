@@ -65,6 +65,10 @@ Discord user and channel.
   not delete repository files or Codex's global history.
 - `/codex use workspace:<name>` changes the workspace used by subsequent normal
   messages in that channel. Without selection, normal messages use `workspace`.
+- `/codex model name:<model-id>` changes the model for subsequent normal
+  messages and `/codex run` requests in that channel. Use `name:default` to
+  return to the model configured locally for Codex. Model availability remains
+  governed by the host's Codex login.
 
 After enabling Discord's **Message Content Intent** for this Bot Application,
 ordinary text from an allowed user in an allowed channel is sent directly to

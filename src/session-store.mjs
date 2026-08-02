@@ -13,6 +13,7 @@ export class SessionStore {
   #file;
   #sessions = new Map();
   #activeWorkspaces = new Map();
+  #activeModels = new Map();
 
   constructor(stateDir) {
     this.#file = path.join(stateDir, "sessions.json");
@@ -32,6 +33,11 @@ export class SessionStore {
       if (raw && typeof raw === "object" && raw.activeWorkspaces && typeof raw.activeWorkspaces === "object") {
         for (const [key, workspace] of Object.entries(raw.activeWorkspaces)) {
           if (typeof workspace === "string") this.#activeWorkspaces.set(key, workspace);
+        }
+      }
+      if (raw && typeof raw === "object" && raw.activeModels && typeof raw.activeModels === "object") {
+        for (const [key, model] of Object.entries(raw.activeModels)) {
+          if (typeof model === "string") this.#activeModels.set(key, model);
         }
       }
     } catch (error) {
@@ -63,10 +69,21 @@ export class SessionStore {
     await this.#save();
   }
 
+  activeModel(key) {
+    return this.#activeModels.get(key) ?? null;
+  }
+
+  async setActiveModel(key, model) {
+    if (model === null) this.#activeModels.delete(key);
+    else this.#activeModels.set(key, model);
+    await this.#save();
+  }
+
   async #save() {
     const payload = JSON.stringify({
       sessions: Object.fromEntries(this.#sessions),
-      activeWorkspaces: Object.fromEntries(this.#activeWorkspaces)
+      activeWorkspaces: Object.fromEntries(this.#activeWorkspaces),
+      activeModels: Object.fromEntries(this.#activeModels)
     }, null, 2) + "\n";
     const temp = `${this.#file}.${process.pid}.tmp`;
     await writeFile(temp, payload, { mode: 0o600 });

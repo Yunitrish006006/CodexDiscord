@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_PROMPT_LENGTH = 6_000;
+const MODEL_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 
 export function validatePrompt(prompt) {
   const normalized = prompt?.trim();
@@ -13,19 +14,30 @@ export function validatePrompt(prompt) {
   return normalized;
 }
 
-export function startArgs({ workspace, prompt, outputFile, skipGitRepoCheck = false }) {
+export function validateModel(model) {
+  if (model === null || model === undefined || model === "default") return null;
+  const normalized = model.trim();
+  if (!MODEL_NAME.test(normalized)) throw new Error("Model name must be 1–80 letters, numbers, dots, dashes, or underscores");
+  return normalized;
+}
+
+export function startArgs({ workspace, prompt, outputFile, model = null, skipGitRepoCheck = false }) {
   const args = [
     "exec", "--json", "--sandbox", "workspace-write", "--cd", workspace,
     "--output-last-message", outputFile
   ];
   if (skipGitRepoCheck) args.push("--skip-git-repo-check");
+  if (model) args.push("--model", model);
   args.push(prompt);
   return args;
 }
 
-export function resumeArgs({ sessionId, prompt, outputFile }) {
+export function resumeArgs({ sessionId, prompt, outputFile, model = null }) {
   if (!UUID.test(sessionId)) throw new Error("Saved Codex session ID is invalid");
-  return ["exec", "resume", "--json", "--output-last-message", outputFile, sessionId, prompt];
+  const args = ["exec", "resume", "--json", "--output-last-message", outputFile];
+  if (model) args.push("--model", model);
+  args.push(sessionId, prompt);
+  return args;
 }
 
 export function sessionIdFromEvent(event) {
@@ -69,13 +81,14 @@ export class CodexRunner {
     return true;
   }
 
-  async execute({ key, workspace, prompt, resumeSessionId = null, skipGitRepoCheck = false, onSessionId = () => {} }) {
+  async execute({ key, workspace, prompt, model = null, resumeSessionId = null, skipGitRepoCheck = false, onSessionId = () => {} }) {
     if (this.#runs.has(key)) throw new Error("A Codex task is already running for this workspace session");
     const safePrompt = validatePrompt(prompt);
+    const safeModel = validateModel(model);
     const outputFile = path.join(this.#stateDir, `result-${process.pid}-${Date.now()}.txt`);
     const args = resumeSessionId
-      ? resumeArgs({ sessionId: resumeSessionId, prompt: safePrompt, outputFile })
-      : startArgs({ workspace, prompt: safePrompt, outputFile, skipGitRepoCheck });
+      ? resumeArgs({ sessionId: resumeSessionId, prompt: safePrompt, outputFile, model: safeModel })
+      : startArgs({ workspace, prompt: safePrompt, outputFile, model: safeModel, skipGitRepoCheck });
 
     return await new Promise((resolve, reject) => {
       let child;
