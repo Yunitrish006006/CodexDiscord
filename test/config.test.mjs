@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAllowedInteraction, loadConfig } from "../src/config.mjs";
+import { isAllowedInteraction, isAllowedMessage, loadConfig } from "../src/config.mjs";
 
 const env = {
   DISCORD_BOT_TOKEN: "test-token",
@@ -28,4 +28,5 @@ test("access requires both the configured user and channel", () => {
   assert.equal(isAllowedInteraction({ ...allowed, user: { id: "999999999999999999" } }, config), false);
   assert.equal(isAllowedInteraction({ ...allowed, channelId: "999999999999999999" }, config), false);
   assert.equal(isAllowedInteraction({ ...allowed, channelId: "999999999999999999", channel: { parentId: "423456789012345678" } }, config), true);
+  assert.equal(isAllowedMessage({ author: { id: "323456789012345678" }, channelId: "423456789012345678", channel: { parentId: null } }, config), true);
 });

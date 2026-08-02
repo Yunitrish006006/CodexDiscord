@@ -5,9 +5,14 @@ export function sessionKey({ userId, channelId, workspace }) {
   return `${userId}:${channelId}:${workspace}`;
 }
 
+export function conversationKey({ userId, channelId }) {
+  return `${userId}:${channelId}`;
+}
+
 export class SessionStore {
   #file;
   #sessions = new Map();
+  #activeWorkspaces = new Map();
 
   constructor(stateDir) {
     this.#file = path.join(stateDir, "sessions.json");
@@ -22,6 +27,11 @@ export class SessionStore {
           if (typeof value?.sessionId === "string" && typeof value?.workspace === "string") {
             this.#sessions.set(key, value);
           }
+        }
+      }
+      if (raw && typeof raw === "object" && raw.activeWorkspaces && typeof raw.activeWorkspaces === "object") {
+        for (const [key, workspace] of Object.entries(raw.activeWorkspaces)) {
+          if (typeof workspace === "string") this.#activeWorkspaces.set(key, workspace);
         }
       }
     } catch (error) {
@@ -44,8 +54,20 @@ export class SessionStore {
     return deleted;
   }
 
+  activeWorkspace(key) {
+    return this.#activeWorkspaces.get(key) ?? null;
+  }
+
+  async setActiveWorkspace(key, workspace) {
+    this.#activeWorkspaces.set(key, workspace);
+    await this.#save();
+  }
+
   async #save() {
-    const payload = JSON.stringify({ sessions: Object.fromEntries(this.#sessions) }, null, 2) + "\n";
+    const payload = JSON.stringify({
+      sessions: Object.fromEntries(this.#sessions),
+      activeWorkspaces: Object.fromEntries(this.#activeWorkspaces)
+    }, null, 2) + "\n";
     const temp = `${this.#file}.${process.pid}.tmp`;
     await writeFile(temp, payload, { mode: 0o600 });
     await chmod(temp, 0o600);

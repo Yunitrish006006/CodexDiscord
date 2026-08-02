@@ -83,9 +83,24 @@ export function loadConfig(env = process.env) {
   });
 }
 
-export function isAllowedInteraction(interaction, config) {
-  if (!config.allowedUserIds.has(interaction.user.id)) return false;
-  const parentId = interaction.channel?.parentId;
-  return config.allowedChannelIds.has(interaction.channelId)
+function isAllowed({ userId, channelId, parentId }, config) {
+  if (!config.allowedUserIds.has(userId)) return false;
+  return config.allowedChannelIds.has(channelId)
     || (parentId !== null && parentId !== undefined && config.allowedChannelIds.has(parentId));
+}
+
+export function isAllowedInteraction(interaction, config) {
+  return isAllowed({
+    userId: interaction.user.id,
+    channelId: interaction.channelId,
+    parentId: interaction.channel?.parentId
+  }, config);
+}
+
+export function isAllowedMessage(message, config) {
+  return isAllowed({
+    userId: message.author.id,
+    channelId: message.channelId,
+    parentId: message.channel?.parentId
+  }, config);
 }

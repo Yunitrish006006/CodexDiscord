@@ -63,6 +63,15 @@ Discord user and channel.
   local Codex process.
 - `/codex reset workspace:<name>` removes the saved session mapping; it does
   not delete repository files or Codex's global history.
+- `/codex use workspace:<name>` changes the workspace used by subsequent normal
+  messages in that channel. Without selection, normal messages use `workspace`.
+
+After enabling Discord's **Message Content Intent** for this Bot Application,
+ordinary text from an allowed user in an allowed channel is sent directly to
+that user's active Codex session. No mention or command prefix is required.
+Keep this channel private: every ordinary message from the configured user is a
+Codex task. Slash-command responses remain ephemeral; ordinary-message
+responses are visible in the allowed channel.
 
 Responses are ephemeral by default so code output does not flood the channel.
 The bot token, prompts and Codex output must still be treated as private to the

@@ -1,6 +1,6 @@
 import { Client, Events, GatewayIntentBits, REST, Routes, SlashCommandBuilder } from "discord.js";
-import { isAllowedInteraction } from "./config.mjs";
-import { sessionKey } from "./session-store.mjs";
+import { isAllowedInteraction, isAllowedMessage } from "./config.mjs";
+import { conversationKey, sessionKey } from "./session-store.mjs";
 
 const MAX_DISCORD_MESSAGE = 1_850;
 
@@ -33,6 +33,10 @@ function commandDefinition(workspaceNames) {
     .addSubcommand((subcommand) => subcommand
       .setName("reset")
       .setDescription("Forget your saved Codex session mapping")
+      .addStringOption(workspaceOption))
+    .addSubcommand((subcommand) => subcommand
+      .setName("use")
+      .setDescription("Use this workspace for normal messages in this channel")
       .addStringOption(workspaceOption));
 }
 
@@ -58,6 +62,38 @@ async function replyChunks(interaction, message) {
   }
 }
 
+async function messageChunks(message, status, content) {
+  const [first, ...rest] = splitMessage(content);
+  await status.edit({ content: first, allowedMentions: { parse: [] } });
+  for (const chunk of rest) await message.channel.send({ content: chunk, allowedMentions: { parse: [] } });
+}
+
+function resultPrefix(result) {
+  if (result.timedOut) return "Codex exceeded the configured time limit and was stopped.\n\n";
+  return result.exitCode === 0 ? "" : `Codex exited with status ${result.exitCode ?? "unknown"}.\n\n`;
+}
+
+async function runTask({ config, runner, sessions, userId, channelId, workspaceName, task }) {
+  const workspaceConfig = config.workspaces.get(workspaceName);
+  if (!workspaceConfig) throw new Error("That workspace is not configured");
+  const key = sessionKey({ userId, channelId, workspace: workspaceName });
+  const saved = sessions.get(key);
+  const result = await runner.execute({
+    key,
+    workspace: workspaceConfig.path,
+    prompt: task,
+    skipGitRepoCheck: workspaceConfig.allowNonGit,
+    resumeSessionId: saved?.sessionId ?? null,
+    onSessionId: async (sessionId) => {
+      await sessions.set(key, { sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
+    }
+  });
+  if (result.sessionId && result.sessionId !== saved?.sessionId) {
+    await sessions.set(key, { sessionId: result.sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
+  }
+  return { key, result };
+}
+
 export async function registerCommands(config) {
   const rest = new REST({ version: "10" }).setToken(config.botToken);
   await rest.put(Routes.applicationGuildCommands(config.applicationId, config.guildId), {
@@ -66,7 +102,11 @@ export async function registerCommands(config) {
 }
 
 export async function startBot({ config, runner, sessions }) {
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  const client = new Client({ intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ] });
   client.once(Events.ClientReady, (readyClient) => {
     console.info(`CodexDiscord ready as ${readyClient.user.tag}`);
   });
@@ -84,6 +124,7 @@ export async function startBot({ config, runner, sessions }) {
       return;
     }
     const key = sessionKey({ userId: interaction.user.id, channelId: interaction.channelId, workspace: workspaceName });
+    const conversation = conversationKey({ userId: interaction.user.id, channelId: interaction.channelId });
     try {
       if (action === "status") {
         const saved = sessions.get(key);
@@ -102,31 +143,47 @@ export async function startBot({ config, runner, sessions }) {
         await interaction.reply({ content: deleted ? "Saved Codex session mapping removed." : "No saved Codex session mapping exists.", ephemeral: true, allowedMentions: { parse: [] } });
         return;
       }
+      if (action === "use") {
+        await sessions.setActiveWorkspace(conversation, workspaceName);
+        await interaction.reply({ content: `Normal messages in this channel will now use **${workspaceName}**.`, ephemeral: true, allowedMentions: { parse: [] } });
+        return;
+      }
 
       const task = interaction.options.getString("task", true);
-      const saved = sessions.get(key);
       await interaction.deferReply({ ephemeral: true });
-      const result = await runner.execute({
-        key,
-        workspace: workspaceConfig.path,
-        prompt: task,
-        skipGitRepoCheck: workspaceConfig.allowNonGit,
-        resumeSessionId: saved?.sessionId ?? null,
-        onSessionId: async (sessionId) => {
-          await sessions.set(key, { sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
-        }
+      await sessions.setActiveWorkspace(conversation, workspaceName);
+      const { result } = await runTask({
+        config, runner, sessions, userId: interaction.user.id, channelId: interaction.channelId, workspaceName, task
       });
-      if (result.sessionId && result.sessionId !== saved?.sessionId) {
-        await sessions.set(key, { sessionId: result.sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
-      }
-      const prefix = result.timedOut
-        ? "Codex exceeded the configured time limit and was stopped.\n\n"
-        : result.exitCode === 0 ? "" : `Codex exited with status ${result.exitCode ?? "unknown"}.\n\n`;
-      await replyChunks(interaction, `${prefix}${result.message}`);
+      await replyChunks(interaction, `${resultPrefix(result)}${result.message}`);
     } catch (error) {
       const message = `Codex request failed: ${error.message}`;
       if (interaction.deferred || interaction.replied) await interaction.editReply({ content: message, allowedMentions: { parse: [] } });
       else await interaction.reply({ content: message, ephemeral: true, allowedMentions: { parse: [] } });
+    }
+  });
+  client.on(Events.MessageCreate, async (message) => {
+    if (message.author.bot || !message.guildId || !message.content.trim() || !isAllowedMessage(message, config)) return;
+    const conversation = conversationKey({ userId: message.author.id, channelId: message.channelId });
+    const workspaceName = sessions.activeWorkspace(conversation) ?? "workspace";
+    const workspaceConfig = config.workspaces.get(workspaceName);
+    if (!workspaceConfig) {
+      await message.reply({ content: "No active workspace is configured. Use `/codex use` once.", allowedMentions: { parse: [] } });
+      return;
+    }
+    const key = sessionKey({ userId: message.author.id, channelId: message.channelId, workspace: workspaceName });
+    if (runner.isRunning(key)) {
+      await message.reply({ content: "Codex is still working on the previous message. Use `/codex cancel` if needed.", allowedMentions: { parse: [] } });
+      return;
+    }
+    const status = await message.reply({ content: `Codex is working in **${workspaceName}**…`, allowedMentions: { parse: [] } });
+    try {
+      const { result } = await runTask({
+        config, runner, sessions, userId: message.author.id, channelId: message.channelId, workspaceName, task: message.content
+      });
+      await messageChunks(message, status, `${resultPrefix(result)}${result.message}`);
+    } catch (error) {
+      await status.edit({ content: `Codex request failed: ${error.message}`, allowedMentions: { parse: [] } });
     }
   });
   await client.login(config.botToken);
