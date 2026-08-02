@@ -8,6 +8,7 @@ test("Codex commands always use the workspace-write sandbox and never a shell", 
   const args = startArgs({ workspace: "/srv/nexus", prompt: "Run tests", outputFile: "/tmp/result.txt" });
   assert.deepEqual(args.slice(0, 7), ["exec", "--json", "--sandbox", "workspace-write", "--cd", "/srv/nexus", "--output-last-message"]);
   assert.equal(args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+  assert.equal(startArgs({ workspace: "/home/thomas/workspace", prompt: "Inspect every module", outputFile: "/tmp/result.txt", skipGitRepoCheck: true }).includes("--skip-git-repo-check"), true);
   assert.deepEqual(resumeArgs({ sessionId, prompt: "Continue", outputFile: "/tmp/result.txt" }).slice(0, 5), ["exec", "resume", "--json", "--output-last-message", "/tmp/result.txt"]);
 });
 

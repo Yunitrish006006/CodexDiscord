@@ -8,12 +8,14 @@ const env = {
   DISCORD_GUILD_ID: "223456789012345678",
   DISCORD_ALLOWED_USER_IDS: "323456789012345678",
   DISCORD_ALLOWED_CHANNEL_IDS: "423456789012345678",
-  CODEX_WORKSPACES_JSON: '{"nexus":"/home/thomas/workspace/TotemNexus"}'
+  CODEX_WORKSPACES_JSON: '{"nexus":"/home/thomas/workspace/TotemNexus"}',
+  CODEX_WORKSPACE_ROOT: "/home/thomas/workspace"
 };
 
 test("configuration requires explicit user, channel and workspace allowlists", () => {
   const config = loadConfig(env);
-  assert.equal(config.workspaces.get("nexus"), "/home/thomas/workspace/TotemNexus");
+  assert.deepEqual(config.workspaces.get("nexus"), { path: "/home/thomas/workspace/TotemNexus", allowNonGit: false });
+  assert.deepEqual(config.workspaces.get("workspace"), { path: "/home/thomas/workspace", allowNonGit: true });
   assert.throws(() => loadConfig({ ...env, DISCORD_ALLOWED_USER_IDS: "" }), /DISCORD_ALLOWED_USER_IDS is required/);
   assert.throws(() => loadConfig({ ...env, CODEX_WORKSPACES_JSON: '{"bad":"relative"}' }), /absolute path/);
   assert.throws(() => loadConfig({ ...env, DISCORD_GUILD_ID: "not-an-id" }), /snowflake/);

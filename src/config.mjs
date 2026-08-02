@@ -27,17 +27,31 @@ function workspaceMap(env) {
   if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
     throw new Error("CODEX_WORKSPACES_JSON must be a non-empty object");
   }
+  const rootWorkspace = env.CODEX_WORKSPACE_ROOT?.trim();
+  if (rootWorkspace && !Object.hasOwn(parsed, "workspace")) {
+    parsed.workspace = { path: rootWorkspace, allowNonGit: true };
+  }
   const entries = Object.entries(parsed);
   if (entries.length === 0) throw new Error("CODEX_WORKSPACES_JSON must not be empty");
   if (entries.length > 25) throw new Error("CODEX_WORKSPACES_JSON supports at most 25 workspaces for Discord commands");
 
   const workspaces = new Map();
-  for (const [name, candidate] of entries) {
+  for (const [name, configured] of entries) {
     if (!WORKSPACE_NAME.test(name)) throw new Error(`Invalid workspace name: ${name}`);
-    if (typeof candidate !== "string" || !path.isAbsolute(candidate)) {
+    const candidate = typeof configured === "string" ? { path: configured, allowNonGit: false } : configured;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error(`Workspace ${name} must be a path string or configuration object`);
+    }
+    if (candidate.allowNonGit !== undefined && typeof candidate.allowNonGit !== "boolean") {
+      throw new Error(`Workspace ${name} allowNonGit must be a boolean`);
+    }
+    if (typeof candidate.path !== "string" || !path.isAbsolute(candidate.path)) {
       throw new Error(`Workspace ${name} must use an absolute path`);
     }
-    workspaces.set(name, path.resolve(candidate));
+    workspaces.set(name, Object.freeze({
+      path: path.resolve(candidate.path),
+      allowNonGit: candidate.allowNonGit === true
+    }));
   }
   return workspaces;
 }

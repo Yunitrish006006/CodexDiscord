@@ -13,11 +13,14 @@ export function validatePrompt(prompt) {
   return normalized;
 }
 
-export function startArgs({ workspace, prompt, outputFile }) {
-  return [
+export function startArgs({ workspace, prompt, outputFile, skipGitRepoCheck = false }) {
+  const args = [
     "exec", "--json", "--sandbox", "workspace-write", "--cd", workspace,
-    "--output-last-message", outputFile, prompt
+    "--output-last-message", outputFile
   ];
+  if (skipGitRepoCheck) args.push("--skip-git-repo-check");
+  args.push(prompt);
+  return args;
 }
 
 export function resumeArgs({ sessionId, prompt, outputFile }) {
@@ -66,13 +69,13 @@ export class CodexRunner {
     return true;
   }
 
-  async execute({ key, workspace, prompt, resumeSessionId = null, onSessionId = () => {} }) {
+  async execute({ key, workspace, prompt, resumeSessionId = null, skipGitRepoCheck = false, onSessionId = () => {} }) {
     if (this.#runs.has(key)) throw new Error("A Codex task is already running for this workspace session");
     const safePrompt = validatePrompt(prompt);
     const outputFile = path.join(this.#stateDir, `result-${process.pid}-${Date.now()}.txt`);
     const args = resumeSessionId
       ? resumeArgs({ sessionId: resumeSessionId, prompt: safePrompt, outputFile })
-      : startArgs({ workspace, prompt: safePrompt, outputFile });
+      : startArgs({ workspace, prompt: safePrompt, outputFile, skipGitRepoCheck });
 
     return await new Promise((resolve, reject) => {
       let child;

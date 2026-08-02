@@ -78,8 +78,8 @@ export async function startBot({ config, runner, sessions }) {
     }
     const action = interaction.options.getSubcommand();
     const workspaceName = interaction.options.getString("workspace", true);
-    const workspace = config.workspaces.get(workspaceName);
-    if (!workspace) {
+    const workspaceConfig = config.workspaces.get(workspaceName);
+    if (!workspaceConfig) {
       await interaction.reply({ content: "That workspace is not configured.", ephemeral: true, allowedMentions: { parse: [] } });
       return;
     }
@@ -108,8 +108,9 @@ export async function startBot({ config, runner, sessions }) {
       await interaction.deferReply({ ephemeral: true });
       const result = await runner.execute({
         key,
-        workspace,
+        workspace: workspaceConfig.path,
         prompt: task,
+        skipGitRepoCheck: workspaceConfig.allowNonGit,
         resumeSessionId: saved?.sessionId ?? null,
         onSessionId: async (sessionId) => {
           await sessions.set(key, { sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });

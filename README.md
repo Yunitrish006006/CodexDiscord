@@ -17,7 +17,8 @@ handles slash commands. Do not add a Gateway listener to the Worker.
 - Only `DISCORD_ALLOWED_CHANNEL_IDS` (or threads beneath those channels) are
   accepted.
 - The user can choose only a configured workspace name; Discord can never pass
-  an arbitrary host path or shell command.
+  an arbitrary host path or shell command. The optional `workspace` root is
+  explicit configuration for cross-module work, not a user-supplied path.
 - Codex is launched with `--sandbox workspace-write`. This service never uses
   `--dangerously-bypass-approvals-and-sandbox`.
 - A Discord conversation stores a separate local Codex session per
@@ -48,7 +49,10 @@ handles slash commands. Do not add a Gateway listener to the Worker.
    ```
 
 The bot registers guild-local slash commands on startup, so command changes
-appear quickly in the selected server.
+appear quickly in the selected server. When `CODEX_WORKSPACE_ROOT` is set,
+select `workspace` for tasks spanning several Totem modules; it is intentionally
+broader than individual module choices and is still restricted to the allowed
+Discord user and channel.
 
 ## Commands
 
