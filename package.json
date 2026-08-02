@@ -1,0 +1,17 @@
+{
+  "name": "codex-discord",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An allow-listed Discord slash-command bridge for local Codex CLI sessions.",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "discord.js": "14.27.0"
+  }
+}
