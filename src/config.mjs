@@ -59,8 +59,8 @@ function workspaceMap(env) {
 function positiveSeconds(env) {
   const raw = env.CODEX_MAX_RUNTIME_SECONDS?.trim() || "900";
   const seconds = Number.parseInt(raw, 10);
-  if (!Number.isSafeInteger(seconds) || seconds < 30 || seconds > 3600) {
-    throw new Error("CODEX_MAX_RUNTIME_SECONDS must be an integer from 30 to 3600");
+  if (!Number.isSafeInteger(seconds) || seconds < 30 || seconds > 7200) {
+    throw new Error("CODEX_MAX_RUNTIME_SECONDS must be an integer from 30 to 7200");
   }
   return seconds;
 }
