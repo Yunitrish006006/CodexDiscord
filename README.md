@@ -6,10 +6,11 @@ the Minecraft mod: TotemDiscordBridge continues to send Minecraft notifications
 to Discord, while this service receives a privileged Discord slash command and
 starts a local coding session for developing the Totem modules.
 
-It deliberately uses the **same Discord Bot application** as the Minecraft
-bridge. The existing Cloudflare Worker uses that token only for Discord REST
-delivery; CodexDiscord is the only process that opens the Bot Gateway and
-handles slash commands. Do not add a Gateway listener to the Worker.
+It deliberately uses a **separate Discord Bot application** from the Minecraft
+bridge. The Minecraft application owns its HTTP Interaction Endpoint and
+commands; the Codex application uses the Bot Gateway and owns only `/codex`.
+Keeping separate applications prevents command registration and interaction
+delivery from overwriting or intercepting each other.
 
 ## Security model
 
@@ -27,21 +28,26 @@ handles slash commands. Do not add a Gateway listener to the Worker.
 
 ## Setup
 
-1. Use the Discord Application and Bot already configured for the Minecraft
-   bridge. Ensure it was invited with the `bot` and `applications.commands`
-   scopes in the intended server.
-2. Copy `.env.example` to `.env`. Provision the same Bot token as a local
-   secret (the Cloudflare Worker secret is not automatically available on this
-   host), fill every Discord ID, and list only workspaces you are willing to
-   let Codex modify.
-3. Install dependencies and verify the pure security/runner tests:
+1. Create a dedicated Discord Application such as `Totem Codex`, add its Bot,
+   and enable **Message Content Intent**. Do not configure an Interaction
+   Endpoint URL; this service receives interactions through the Gateway.
+2. Invite that Bot to the intended server with the `bot` and
+   `applications.commands` scopes. Grant only View Channels, Send Messages,
+   Send Messages in Threads, Attach Files, and Read Message History in the
+   private Codex channel.
+3. Copy `.env.example` to `.env`. Put the new Codex Bot token and Application
+   ID in `DISCORD_BOT_TOKEN` and `DISCORD_APPLICATION_ID`, and put the existing
+   Minecraft application ID in `DISCORD_BRIDGE_APPLICATION_ID`. Startup rejects
+   a configuration where the two Application IDs are equal. Fill every other
+   Discord ID and list only workspaces you are willing to let Codex modify.
+4. Install dependencies and verify the pure security/runner tests:
 
    ```bash
    npm install
    npm test
    ```
 
-4. Confirm this host is already authenticated for the CLI with
+5. Confirm this host is already authenticated for the CLI with
    `codex login status`, then start the bot:
 
    ```bash
@@ -65,10 +71,45 @@ Discord user and channel.
   not delete repository files or Codex's global history.
 - `/codex use workspace:<name>` changes the workspace used by subsequent normal
   messages in that channel. Without selection, normal messages use `workspace`.
-- `/codex model name:<model-id>` changes the model for subsequent normal
-  messages and `/codex run` requests in that channel. Use `name:default` to
-  return to the model configured locally for Codex. Model availability remains
-  governed by the host's Codex login.
+- `/codex model name:<model>` changes the model for subsequent normal messages
+  and `/codex run` requests in that channel. Discord shows an autocomplete
+  picker populated from the models currently available to this host's Codex
+  login; arbitrary model IDs are rejected. Choose **Codex local default** to
+  return to the model configured locally for Codex. The catalog is refreshed
+  whenever the service starts.
+- `/codex reasoning effort:<depth>` shows only the thinking depths that the
+  active model supports. Select **Model default** to remove the override; model
+  changes also reset the depth to that model's default.
+- `/codex progress lines:<0–8>` changes how many recent CLI-style gray activity
+  lines are shown live for this user in this channel. The default is 4; choose
+  0 to hide progress entirely. When enabled, sanitized non-command activity is
+  retained above the final Codex reply; command execution appears only in the
+  live tail. The setting survives Bot restarts.
+- `/codex usage` shows the authenticated Codex account's remaining quota
+  percentage for each currently reported usage window and its reset time. This
+  response is visible only to the caller. The Bot's Discord activity also shows
+  a compact remaining-usage summary; it refreshes at startup, after each Codex
+  task finishes, and whenever `/codex usage` is queried.
+- Requests that create or modify source code, tests, scripts, build files, or
+  code-related configuration are coordinated by the selected primary model but
+  implemented first by a `gpt-5.3-codex-spark` subagent at medium reasoning.
+  The primary waits for the subagent, reviews its changes and verification, and
+  makes only necessary follow-up corrections. Read-only questions and ordinary
+  explanations stay on the primary model. This routing is attached only to
+  CodexDiscord threads and does not change the host's global Codex model.
+- Attach a PNG, JPEG, WebP, or GIF to an ordinary message and Codex receives it
+  as visual context; a message containing only an image asks Codex to inspect
+  it. `/codex run` also accepts one optional `image` attachment. Up to four
+  images, each 25 MiB, are accepted per ordinary message. Images are passed
+  directly from Discord's CDN to Codex and are not saved on this host.
+- Images generated by Codex are uploaded directly to the final Discord reply.
+  PNG, JPEG, WebP, and GIF links in the final response are also attached when
+  their real files stay inside the selected allow-listed workspace. Up to four
+  output images of 25 MiB each are sent. Symlinks cannot escape the workspace;
+  only authoritative built-in image-generation results may come from `/tmp`.
+  Attachment requests may run for up to five minutes on slow uplinks; one retry
+  is allowed, and terminal failures are written to the service journal before
+  the final response falls back to text-only delivery.
 
 After enabling Discord's **Message Content Intent** for this Bot Application,
 ordinary text from an allowed user in an allowed channel is sent directly to
@@ -78,17 +119,39 @@ Codex task. Slash-command responses remain ephemeral; ordinary-message
 responses are visible in the allowed channel.
 
 While a task is running, its initial Bot response is edited in place with safe
-progress: a readable reasoning summary, plan updates, and high-level command or
-file-change activity. Raw reasoning text and command output are not posted to
-Discord. When Codex needs approval, that same message becomes an approval card
+progress. A rolling CLI-style activity tail uses Discord's gray subtext for
+readable reasoning summaries, commands, file changes, searches, and tool calls.
+Sensitive command details are redacted, and raw reasoning text and command
+output are not posted to Discord. When Codex needs approval, that same message becomes an approval card
 with **Allow once**, **Allow for this session**, and **Decline** buttons. Only
 the configured Discord user in the configured channel can answer those buttons.
 The service continues to run in the `workspace-write` sandbox; a button never
 grants `danger-full-access`.
 
-Responses are ephemeral by default so code output does not flood the channel.
-The bot token, prompts and Codex output must still be treated as private to the
-allowed Discord users.
+The approval card also offers **Allow all for this task**. It accepts the
+current request and automatically accepts later command, file-change, and
+permission requests only until that active task finishes or is cancelled. The
+choice is never carried into a later Discord message or Codex task.
+
+The persistent status message keeps the Discord **question/request**, current
+status, and a short sanitized activity tail while work is running. Approval
+details are shown only while the decision is pending. On completion, all
+sanitized non-command progress entries are kept as gray subtext above Codex's
+final response. Command execution is removed with the live status instead of
+being retained. Streamed progress is accumulated without character slicing so
+its sentences remain complete; long final output is split across Discord
+messages without dropping text.
+
+Direct Gradle compilation, test, and local packaging tasks are accepted
+automatically. Shell-wrapped commands, cleanup, publishing, network or file
+scope changes, and other operations still require the allowed Discord user to
+decide.
+
+Short slash-command responses are ephemeral. A running `/codex run` request is
+instead a persistent status message: Discord expires interaction webhooks after
+a short window, while a normal Bot message keeps its approval controls and
+progress updates usable for the complete local run. Keep the allowed channel
+private, because long-running task prompts and final results are visible there.
 
 ## Service operation
 
@@ -96,3 +159,7 @@ Run this as the same operating-system user that owns the existing Codex login.
 Keep `.env` outside source control. A systemd unit should use an `EnvironmentFile`
 with mode `0600`, set `WorkingDirectory` to this directory, and run only after
 the configured workspaces are mounted.
+
+`CODEX_MAX_RUNTIME_SECONDS=0` leaves Codex tasks running until they complete or
+the user cancels them. Set it to 30–7200 only when a finite safety deadline is
+desired.

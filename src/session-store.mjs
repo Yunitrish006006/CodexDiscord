@@ -14,6 +14,8 @@ export class SessionStore {
   #sessions = new Map();
   #activeWorkspaces = new Map();
   #activeModels = new Map();
+  #activeReasoningEfforts = new Map();
+  #progressLineCounts = new Map();
 
   constructor(stateDir) {
     this.#file = path.join(stateDir, "sessions.json");
@@ -38,6 +40,16 @@ export class SessionStore {
       if (raw && typeof raw === "object" && raw.activeModels && typeof raw.activeModels === "object") {
         for (const [key, model] of Object.entries(raw.activeModels)) {
           if (typeof model === "string") this.#activeModels.set(key, model);
+        }
+      }
+      if (raw && typeof raw === "object" && raw.activeReasoningEfforts && typeof raw.activeReasoningEfforts === "object") {
+        for (const [key, effort] of Object.entries(raw.activeReasoningEfforts)) {
+          if (typeof effort === "string") this.#activeReasoningEfforts.set(key, effort);
+        }
+      }
+      if (raw && typeof raw === "object" && raw.progressLineCounts && typeof raw.progressLineCounts === "object") {
+        for (const [key, count] of Object.entries(raw.progressLineCounts)) {
+          if (Number.isSafeInteger(count) && count >= 0 && count <= 8) this.#progressLineCounts.set(key, count);
         }
       }
     } catch (error) {
@@ -79,11 +91,35 @@ export class SessionStore {
     await this.#save();
   }
 
+  activeReasoningEffort(key) {
+    return this.#activeReasoningEfforts.get(key) ?? null;
+  }
+
+  async setActiveReasoningEffort(key, effort) {
+    if (effort === null) this.#activeReasoningEfforts.delete(key);
+    else this.#activeReasoningEfforts.set(key, effort);
+    await this.#save();
+  }
+
+  progressLineCount(key) {
+    return this.#progressLineCounts.get(key) ?? null;
+  }
+
+  async setProgressLineCount(key, count) {
+    if (!Number.isSafeInteger(count) || count < 0 || count > 8) {
+      throw new Error("Progress line count must be an integer from 0 to 8");
+    }
+    this.#progressLineCounts.set(key, count);
+    await this.#save();
+  }
+
   async #save() {
     const payload = JSON.stringify({
       sessions: Object.fromEntries(this.#sessions),
       activeWorkspaces: Object.fromEntries(this.#activeWorkspaces),
-      activeModels: Object.fromEntries(this.#activeModels)
+      activeModels: Object.fromEntries(this.#activeModels),
+      activeReasoningEfforts: Object.fromEntries(this.#activeReasoningEfforts),
+      progressLineCounts: Object.fromEntries(this.#progressLineCounts)
     }, null, 2) + "\n";
     const temp = `${this.#file}.${process.pid}.tmp`;
     await writeFile(temp, payload, { mode: 0o600 });

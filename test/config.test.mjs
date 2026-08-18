@@ -5,6 +5,7 @@ import { isAllowedInteraction, isAllowedMessage, loadConfig } from "../src/confi
 const env = {
   DISCORD_BOT_TOKEN: "test-token",
   DISCORD_APPLICATION_ID: "123456789012345678",
+  DISCORD_BRIDGE_APPLICATION_ID: "133456789012345678",
   DISCORD_GUILD_ID: "223456789012345678",
   DISCORD_ALLOWED_USER_IDS: "323456789012345678",
   DISCORD_ALLOWED_CHANNEL_IDS: "423456789012345678",
@@ -16,11 +17,18 @@ test("configuration requires explicit user, channel and workspace allowlists", (
   const config = loadConfig(env);
   assert.deepEqual(config.workspaces.get("nexus"), { path: "/home/thomas/workspace/TotemNexus", allowNonGit: false });
   assert.deepEqual(config.workspaces.get("workspace"), { path: "/home/thomas/workspace", allowNonGit: true });
+  assert.equal(config.maxRuntimeMs, 0);
+  assert.equal(loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "0" }).maxRuntimeMs, 0);
   assert.equal(loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "6000" }).maxRuntimeMs, 6_000_000);
   assert.throws(() => loadConfig({ ...env, DISCORD_ALLOWED_USER_IDS: "" }), /DISCORD_ALLOWED_USER_IDS is required/);
   assert.throws(() => loadConfig({ ...env, CODEX_WORKSPACES_JSON: '{"bad":"relative"}' }), /absolute path/);
   assert.throws(() => loadConfig({ ...env, DISCORD_GUILD_ID: "not-an-id" }), /snowflake/);
-  assert.throws(() => loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "7201" }), /30 to 7200/);
+  assert.throws(
+    () => loadConfig({ ...env, DISCORD_APPLICATION_ID: env.DISCORD_BRIDGE_APPLICATION_ID }),
+    /different Application/
+  );
+  assert.throws(() => loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "1" }), /0 \(unlimited\) or an integer from 30 to 7200/);
+  assert.throws(() => loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "7201" }), /0 \(unlimited\) or an integer from 30 to 7200/);
 });
 
 test("access requires both the configured user and channel", () => {

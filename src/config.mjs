@@ -56,29 +56,34 @@ function workspaceMap(env) {
   return workspaces;
 }
 
-function positiveSeconds(env) {
-  const raw = env.CODEX_MAX_RUNTIME_SECONDS?.trim() || "900";
+function runtimeSeconds(env) {
+  const raw = env.CODEX_MAX_RUNTIME_SECONDS?.trim() || "0";
   const seconds = Number.parseInt(raw, 10);
-  if (!Number.isSafeInteger(seconds) || seconds < 30 || seconds > 7200) {
-    throw new Error("CODEX_MAX_RUNTIME_SECONDS must be an integer from 30 to 7200");
+  if (!Number.isSafeInteger(seconds) || (seconds !== 0 && (seconds < 30 || seconds > 7200))) {
+    throw new Error("CODEX_MAX_RUNTIME_SECONDS must be 0 (unlimited) or an integer from 30 to 7200");
   }
   return seconds;
 }
 
 export function loadConfig(env = process.env) {
   const applicationId = required(env, "DISCORD_APPLICATION_ID");
+  const bridgeApplicationId = required(env, "DISCORD_BRIDGE_APPLICATION_ID");
   const guildId = required(env, "DISCORD_GUILD_ID");
-  if (!DISCORD_ID.test(applicationId) || !DISCORD_ID.test(guildId)) {
-    throw new Error("DISCORD_APPLICATION_ID and DISCORD_GUILD_ID must be Discord snowflake IDs");
+  if (!DISCORD_ID.test(applicationId) || !DISCORD_ID.test(bridgeApplicationId) || !DISCORD_ID.test(guildId)) {
+    throw new Error("Discord application and guild IDs must be Discord snowflake IDs");
+  }
+  if (applicationId === bridgeApplicationId) {
+    throw new Error("Discord Codex must use a different Application than the Minecraft Discord Bridge");
   }
   return Object.freeze({
     botToken: required(env, "DISCORD_BOT_TOKEN"),
     applicationId,
+    bridgeApplicationId,
     guildId,
     allowedUserIds: idSet(env, "DISCORD_ALLOWED_USER_IDS"),
     allowedChannelIds: idSet(env, "DISCORD_ALLOWED_CHANNEL_IDS"),
     workspaces: workspaceMap(env),
-    maxRuntimeMs: positiveSeconds(env) * 1000,
+    maxRuntimeMs: runtimeSeconds(env) * 1000,
     stateDir: path.resolve(env.CODEX_STATE_DIR || "data")
   });
 }
