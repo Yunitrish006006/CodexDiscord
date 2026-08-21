@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyUsagePresence, approvalComponents, commandDefinition, createProgressReporter, formatQuestionResult, formatUsageResult, imageUrlsForAttachments, modelAutocompleteChoices, reasoningAutocompleteChoices, statusChunks, usagePresenceText } from "../src/bot.mjs";
+import { applyUsagePresence, approvalComponents, commandDefinition, createProgressReporter, formatQuestionResult, formatUsageResult, imageUrlsForAttachments, isReplyToActiveStatus, modelAutocompleteChoices, reasoningAutocompleteChoices, statusChunks, usagePresenceText } from "../src/bot.mjs";
 
 test("progress cards show sanitized CLI-style activity as Discord subtext", async () => {
   const edits = [];
@@ -43,17 +43,17 @@ test("progress cards show sanitized CLI-style activity as Discord subtext", asyn
   assert.match(final, /Codex 回覆/);
   assert.match(final, /測試已完成/);
   assert.match(final, /-# 思考：先確認測試與目前設定。/);
-  assert.doesNotMatch(final, /npm test|本機指令|exit 0/);
+  assert.doesNotMatch(final, /npm test|本機指令|exit 0|src\/bot\.mjs|修改檔案/);
   assert.ok(final.indexOf("-# 思考：") < final.indexOf("**Codex 回覆**"));
 });
 
-test("progress cards identify the Spark coding subagent", async () => {
+test("file and current subagent activity stays live but is omitted from final progress", async () => {
   const edits = [];
   const progress = createProgressReporter({
     workspaceName: "workspace",
     task: "修改程式並補測試",
     model: "gpt-5.6-sol",
-    progressLines: 2,
+    progressLines: 3,
     edit: async (payload) => edits.push(payload)
   });
 
@@ -69,10 +69,61 @@ test("progress cards identify the Spark coding subagent", async () => {
       }
     }
   });
+  progress.update({
+    method: "item/started",
+    params: {
+      item: {
+        id: "subagent-activity-1",
+        type: "subAgentActivity",
+        kind: "interacted"
+      }
+    }
+  });
+  progress.update({
+    method: "item/completed",
+    params: {
+      item: {
+        id: "newer-subagent-activity-1",
+        type: "collabToolCall",
+        tool: "wait",
+        model: "gpt-5.3-codex-spark"
+      }
+    }
+  });
   const retainedProgress = await progress.finish();
 
   assert.match(edits.at(-1).content, /已啟動程式 subagent：gpt-5\.3-codex-spark/);
-  assert.deepEqual(retainedProgress, ["已啟動程式 subagent：gpt-5.3-codex-spark"]);
+  assert.match(edits.at(-1).content, /程式 subagent 正在回覆協調訊息/);
+  assert.match(edits.at(-1).content, /程式 subagent 工作完成/);
+  assert.deepEqual(retainedProgress, []);
+});
+
+test("only a task owner can reply to that task's persistent status card", () => {
+  const activeTask = {
+    statusMessageId: "status-1",
+    userId: "user-1",
+    channelId: "channel-1"
+  };
+  assert.equal(isReplyToActiveStatus({
+    reference: { messageId: "status-1" },
+    author: { id: "user-1" },
+    channelId: "channel-1"
+  }, activeTask), true);
+  assert.equal(isReplyToActiveStatus({
+    reference: { messageId: "status-1" },
+    author: { id: "other-user" },
+    channelId: "channel-1"
+  }, activeTask), false);
+  assert.equal(isReplyToActiveStatus({
+    reference: { messageId: "another-message" },
+    author: { id: "user-1" },
+    channelId: "channel-1"
+  }, activeTask), false);
+  assert.equal(isReplyToActiveStatus({
+    reference: { message_id: "status-1" },
+    author: { id: "user-1" },
+    channelId: "other-channel"
+  }, activeTask), false);
 });
 
 test("approval cards offer task-scoped automatic approval", async () => {

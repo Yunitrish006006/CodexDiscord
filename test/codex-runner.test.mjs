@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { approvalResponse, CODING_SUBAGENT_MODEL, CodexRunner, finalAgentMessage, generatedImagePaths, imageInputs, isAutoApprovedGradleCompile, threadResumeParams, threadStartParams, turnStartParams, validateModel, validatePrompt, validateReasoningEffort } from "../src/codex-runner.mjs";
+import { approvalResponse, CODING_SUBAGENT_MODEL, CodexRunner, finalAgentMessage, generatedImagePaths, imageInputs, isAutoApprovedGradleCompile, threadResumeParams, threadStartParams, turnStartParams, turnSteerParams, validateModel, validatePrompt, validateReasoningEffort } from "../src/codex-runner.mjs";
 
 test("Codex App Server sessions always confine writes to the selected workspace", () => {
   const start = threadStartParams({ workspace: "/srv/nexus", model: "gpt-5.6-terra" });
@@ -42,6 +42,26 @@ test("Codex App Server sessions always confine writes to the selected workspace"
     { type: "image", url: "https://cdn.discordapp.com/attachments/1/2/screenshot.png" }
   ]);
   assert.equal(turn.effort, "high");
+
+  const steer = turnSteerParams({
+    threadId: "thread-123",
+    expectedTurnId: "turn-456",
+    prompt: "Focus on the failing tests first.",
+    imageUrls: ["https://cdn.discordapp.com/attachments/1/2/screenshot.png"],
+    clientUserMessageId: "123456789"
+  });
+  assert.deepEqual(steer, {
+    threadId: "thread-123",
+    expectedTurnId: "turn-456",
+    input: [
+      { type: "text", text: "Focus on the failing tests first." },
+      { type: "image", url: "https://cdn.discordapp.com/attachments/1/2/screenshot.png" }
+    ],
+    clientUserMessageId: "123456789"
+  });
+  assert.equal(Object.hasOwn(steer, "cwd"), false);
+  assert.equal(Object.hasOwn(steer, "model"), false);
+  assert.equal(Object.hasOwn(steer, "sandboxPolicy"), false);
 });
 
 test("approval responses are scoped and never auto-grant unrequested permissions", () => {
@@ -271,6 +291,90 @@ test("zero max runtime leaves a Codex task running until it completes", async ()
   assert.equal(result.exitCode, 0);
   assert.equal(result.timedOut, false);
   assert.equal(result.message, "Completed without a deadline.");
+});
+
+test("steering uses the active turn IDs, image input, and FIFO request order", async () => {
+  const key = "user:channel:workspace";
+  const steerRequests = [];
+  let started;
+  const startedTurn = new Promise((resolve) => { started = resolve; });
+  let complete;
+  const completedTurn = new Promise((resolve) => { complete = resolve; });
+  const child = new FakeAppServer((request, respond, notify) => {
+    if (request.method === "initialize") respond({ id: request.id, result: {} });
+    else if (request.method === "thread/start") respond({ id: request.id, result: { thread: { id: "steer-thread" } } });
+    else if (request.method === "turn/start") {
+      respond({ id: request.id, result: { turn: { id: "steer-turn" } } });
+      started();
+    } else if (request.method === "turn/steer") {
+      steerRequests.push(request.params);
+      respond({ id: request.id, result: { turnId: "steer-turn" } });
+      if (steerRequests.length === 2) complete();
+    } else if (request.method === "test/complete") {
+      notify({ method: "turn/completed", params: { turn: { status: "completed", items: [{ type: "agentMessage", text: "Steered." }] } } });
+    }
+  });
+  const runner = new CodexRunner({ maxRuntimeMs: 5_000, spawnImpl: () => child });
+  const run = runner.execute({ key, workspace: "/srv/nexus", prompt: "Start the work" });
+
+  await startedTurn;
+  const first = runner.steer(key, {
+    prompt: "Check failing tests first.",
+    imageUrls: ["https://cdn.discordapp.com/attachments/1/2/first.png"],
+    clientUserMessageId: "discord-1"
+  });
+  const second = runner.steer(key, { prompt: "Then summarize the fixes.", clientUserMessageId: "discord-2" });
+
+  await Promise.all([first, second]);
+  await completedTurn;
+  child.stdin.write(`${JSON.stringify({ method: "test/complete" })}\n`);
+  const result = await run;
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(steerRequests, [
+    {
+      threadId: "steer-thread",
+      expectedTurnId: "steer-turn",
+      input: [
+        { type: "text", text: "Check failing tests first." },
+        { type: "image", url: "https://cdn.discordapp.com/attachments/1/2/first.png" }
+      ],
+      clientUserMessageId: "discord-1"
+    },
+    {
+      threadId: "steer-thread",
+      expectedTurnId: "steer-turn",
+      input: [{ type: "text", text: "Then summarize the fixes." }],
+      clientUserMessageId: "discord-2"
+    }
+  ]);
+});
+
+test("early steering waits for turn IDs and rejects truthfully when the turn completes first", async () => {
+  const key = "user:channel:workspace";
+  let sawSteer = false;
+  const child = new FakeAppServer((request, respond, notify) => {
+    if (request.method === "initialize") respond({ id: request.id, result: {} });
+    else if (request.method === "thread/start") respond({ id: request.id, result: { thread: { id: "race-thread" } } });
+    else if (request.method === "turn/start") {
+      respond({ id: request.id, result: { turn: { id: "race-turn" } } });
+      notify({ method: "turn/completed", params: { turn: { status: "completed", items: [{ type: "agentMessage", text: "Already done." }] } } });
+    } else if (request.method === "turn/steer") {
+      sawSteer = true;
+      respond({ id: request.id, result: { turnId: "race-turn" } });
+    }
+  });
+  const runner = new CodexRunner({ maxRuntimeMs: 5_000, spawnImpl: () => child });
+  const run = runner.execute({ key, workspace: "/srv/nexus", prompt: "Finish quickly" });
+  const steering = runner.steer(key, { prompt: "Actually wait." });
+
+  await assert.rejects(steering, /no longer accepting steering input.*completed before/i);
+  const result = await run;
+  assert.equal(result.message, "Already done.");
+  // The request was held until turn/start supplied IDs. The completion raced
+  // with its response, so the user still receives a truthful rejection.
+  assert.equal(sawSteer, true);
+  await assert.rejects(runner.steer(key, { prompt: "Too late." }), /No active Codex turn is available to steer/);
 });
 
 test("task-scoped automatic approval accepts current and subsequent permission types", async () => {
