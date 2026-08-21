@@ -82,9 +82,10 @@ Discord user and channel.
   changes also reset the depth to that model's default.
 - `/codex progress lines:<0–8>` changes how many recent CLI-style gray activity
   lines are shown live for this user in this channel. The default is 4; choose
-  0 to hide progress entirely. When enabled, sanitized non-command activity is
-  retained above the final Codex reply; command execution appears only in the
-  live tail. The setting survives Bot restarts.
+  0 to hide progress entirely. When enabled, sanitized commentary and planning
+  progress is retained above the final Codex reply. Command execution, file
+  changes, and subagent activity appear only in the live tail. The setting
+  survives Bot restarts.
 - `/codex usage` shows the authenticated Codex account's remaining quota
   percentage for each currently reported usage window and its reset time. This
   response is visible only to the caller. The Bot's Discord activity also shows
@@ -133,14 +134,21 @@ current request and automatically accepts later command, file-change, and
 permission requests only until that active task finishes or is cancelled. The
 choice is never carried into a later Discord message or Codex task.
 
+To redirect a running task like Codex CLI, reply directly to its persistent
+status message. The reply's text and up to four trusted Discord image
+attachments are appended to the same in-flight turn in arrival order. The Bot
+acknowledges an accepted reply with `↪️`; ordinary messages that are not replies
+keep the existing busy-task behavior. A reply cannot approve an operation or
+grant permissions: approval buttons remain the only approval path.
+
 The persistent status message keeps the Discord **question/request**, current
 status, and a short sanitized activity tail while work is running. Approval
-details are shown only while the decision is pending. On completion, all
-sanitized non-command progress entries are kept as gray subtext above Codex's
-final response. Command execution is removed with the live status instead of
-being retained. Streamed progress is accumulated without character slicing so
-its sentences remain complete; long final output is split across Discord
-messages without dropping text.
+details are shown only while the decision is pending. On completion, operational
+command, file-change, and subagent entries are removed with the live status;
+only sanitized commentary/planning progress may remain above Codex's final
+response. Streamed progress is accumulated without character slicing so its
+sentences remain complete; long final output is split across Discord messages
+without dropping text.
 
 Direct Gradle compilation, test, and local packaging tasks are accepted
 automatically. Shell-wrapped commands, cleanup, publishing, network or file

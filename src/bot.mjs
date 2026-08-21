@@ -15,6 +15,7 @@ const DEFAULT_CLI_PROGRESS_LINES = 4;
 const MAX_CLI_PROGRESS_LINES = 8;
 const MAX_FINAL_PROGRESS_LINE = MAX_DISCORD_MESSAGE - 3;
 const DISCORD_REST_TIMEOUT_MS = 5 * 60 * 1_000;
+const LIVE_ONLY_ITEM_TYPES = new Set(["commandexecution", "filechange", "collabagenttoolcall", "collabtoolcall", "subagentactivity"]);
 
 export function commandDefinition(workspaceNames) {
   const choices = workspaceNames.map((name) => ({ name, value: name }));
@@ -320,11 +321,19 @@ function cliItemDetail(item, completed) {
   }
   if (type === "imageview") return `檢視圖片：${safeProgressText(item?.path) || "圖片"}`;
   if (type === "imagegeneration") return completed ? "圖片產生完成" : "正在產生圖片";
-  if (type === "collabagenttoolcall") {
+  if (type === "collabagenttoolcall" || type === "collabtoolcall") {
     const model = safeProgressText(item?.model) || CODING_SUBAGENT_MODEL;
     if (item?.tool === "spawnAgent") return `${completed ? "已啟動" : "正在啟動"}程式 subagent：${model}`;
     if (item?.tool === "wait") return completed ? "程式 subagent 工作完成" : "正在等待程式 subagent";
     return `${completed ? "subagent 協調完成" : "正在協調 subagent"}：${model}`;
+  }
+  if (type === "subagentactivity") {
+    const byKind = {
+      started: "程式 subagent 已開始工作",
+      interacted: "程式 subagent 正在回覆協調訊息",
+      interrupted: "程式 subagent 已停止"
+    };
+    return byKind[item?.kind] ?? "程式 subagent 正在工作…";
   }
   return "";
 }
@@ -645,12 +654,12 @@ export function createProgressReporter({ workspaceName, task, model, reasoningEf
       }
       const detail = cliItemDetail(item, method === "item/completed");
       if (detail) {
-        const retainMode = itemType === "commandexecution" ? "none" : "append";
+        const retainMode = LIVE_ONLY_ITEM_TYPES.has(itemType) ? "none" : "append";
         setCliProgress(`item:${item.id ?? itemType}`, detail, retainMode);
       }
       if (itemType === "commandexecution") activity = "正在執行本機工作…";
       else if (itemType === "filechange") activity = "正在修改工作區檔案…";
-      else if (itemType === "collabagenttoolcall") activity = `正在協調 ${CODING_SUBAGENT_MODEL} subagent…`;
+      else if (itemType === "collabagenttoolcall" || itemType === "collabtoolcall" || itemType === "subagentactivity") activity = `正在協調 ${CODING_SUBAGENT_MODEL} subagent…`;
       else if (itemType === "mcptoolcall" || itemType === "dynamictoolcall") activity = "正在使用整合工具…";
       else if (itemType === "agentmessage") activity = "正在整理回覆…";
       else if (itemType === "websearch") activity = "正在搜尋資料…";
@@ -688,6 +697,10 @@ export function createProgressReporter({ workspaceName, task, model, reasoningEf
         await flush();
       }
     },
+    async steeringReceived() {
+      activity = "已收到導正，正在調整方向…";
+      await flush();
+    },
     async finish() {
       finalizeStreamedProgress();
       await flush();
@@ -695,6 +708,25 @@ export function createProgressReporter({ workspaceName, task, model, reasoningEf
       return retainedProgress.map((entry) => entry.text);
     }
   };
+}
+
+/** True only for a reply from the task owner in the status message's channel. */
+export function isReplyToActiveStatus(message, activeTask) {
+  const referenceId = message?.reference?.messageId ?? message?.reference?.message_id;
+  return Boolean(activeTask
+    && typeof referenceId === "string"
+    && referenceId === activeTask.statusMessageId
+    && message?.author?.id === activeTask.userId
+    && message?.channelId === activeTask.channelId);
+}
+
+async function acknowledgeSteering(message) {
+  if (typeof message?.react !== "function") return;
+  try {
+    await message.react("↪️");
+  } catch {
+    // Reactions are only an unobtrusive acknowledgement; missing permission is fine.
+  }
 }
 
 async function runTask({ config, runner, sessions, userId, channelId, workspaceName, task, model = null, reasoningEffort = null, imageUrls = [], onProgress = () => {}, onApproval = () => {} }) {
@@ -732,6 +764,7 @@ export async function registerCommands(config) {
 
 export async function startBot({ config, runner, sessions, models = [] }) {
   const approvals = new Map();
+  const activeTasks = new Map();
   const catalogWorkspace = config.workspaces.values().next().value;
   let usagePresenceRefresh = Promise.resolve();
   const refreshUsagePresence = () => {
@@ -918,6 +951,7 @@ export async function startBot({ config, runner, sessions, models = [] }) {
     let task = "";
     let taskStarted = false;
     let progress = null;
+    let activeTask = null;
     try {
       if (action === "status") {
         const saved = sessions.get(key);
@@ -966,6 +1000,16 @@ export async function startBot({ config, runner, sessions, models = [] }) {
         edit: (payload) => status.edit(payload)
       });
       taskStarted = true;
+      activeTask = {
+        key,
+        userId: interaction.user.id,
+        channelId: interaction.channelId,
+        workspaceName,
+        statusMessageId: status.id,
+        progress,
+        model: activeModel
+      };
+      activeTasks.set(key, activeTask);
       const { result } = await runTask({
         config, runner, sessions, userId: interaction.user.id, channelId: interaction.channelId, workspaceName, task,
         model,
@@ -992,12 +1036,39 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       else if (interaction.deferred || interaction.replied) await interaction.editReply({ content: message, allowedMentions: { parse: [] } });
       else await interaction.reply({ content: message, ephemeral: true, allowedMentions: { parse: [] } });
     } finally {
+      if (activeTask && activeTasks.get(activeTask.key) === activeTask) activeTasks.delete(activeTask.key);
       if (taskStarted) void refreshUsagePresence();
     }
   });
   client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot || !message.guildId || (!message.content.trim() && message.attachments.size === 0) || !isAllowedMessage(message, config)) return;
     const conversation = conversationKey({ userId: message.author.id, channelId: message.channelId });
+    const replyTask = [...activeTasks.values()].find((activeTask) => isReplyToActiveStatus(message, activeTask));
+    if (replyTask) {
+      let imageUrls;
+      try {
+        imageUrls = imageUrlsForAttachments(message.attachments.values(), replyTask.model);
+      } catch (error) {
+        await message.reply({ content: `Codex image upload failed: ${error.message}`, allowedMentions: { parse: [] } });
+        return;
+      }
+      const steeringTask = message.content.trim() || "請檢視我上傳的圖片，並依此導正目前工作。";
+      try {
+        await runner.steer(replyTask.key, {
+          prompt: steeringTask,
+          imageUrls,
+          clientUserMessageId: message.id
+        });
+        await replyTask.progress.steeringReceived();
+        await acknowledgeSteering(message);
+      } catch (error) {
+        await message.reply({
+          content: `無法導正目前的 Codex 工作：${error.message}`,
+          allowedMentions: { parse: [] }
+        });
+      }
+      return;
+    }
     const workspaceName = sessions.activeWorkspace(conversation) ?? "workspace";
     const workspaceConfig = config.workspaces.get(workspaceName);
     if (!workspaceConfig) {
@@ -1030,6 +1101,16 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       imageCount: imageUrls.length,
       edit: (payload) => status.edit(payload)
     });
+    const activeTask = {
+      key,
+      userId: message.author.id,
+      channelId: message.channelId,
+      workspaceName,
+      statusMessageId: status.id,
+      progress,
+      model: activeCatalogModel(model, models)
+    };
+    activeTasks.set(key, activeTask);
     try {
       const { result } = await runTask({
         config, runner, sessions, userId: message.author.id, channelId: message.channelId, workspaceName, task, model, reasoningEffort, imageUrls,
@@ -1050,6 +1131,7 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       await messageChunks(status,
         formatQuestionResult(task, { exitCode: 1, message: `Codex request failed: ${error.message}` }, retainedProgress));
     } finally {
+      if (activeTasks.get(key) === activeTask) activeTasks.delete(key);
       void refreshUsagePresence();
     }
   });

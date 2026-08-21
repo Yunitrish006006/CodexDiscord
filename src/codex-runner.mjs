@@ -96,6 +96,26 @@ export function turnStartParams({ threadId, workspace, prompt, model = null, rea
   });
 }
 
+/**
+ * Builds the deliberately narrow App Server request used to redirect an
+ * in-flight turn. Unlike turn/start, steering must not be able to alter the
+ * workspace, model, approvals, or sandbox chosen for the task.
+ */
+export function turnSteerParams({ threadId, expectedTurnId, prompt, imageUrls = [], clientUserMessageId = null }) {
+  if (typeof threadId !== "string" || !threadId.trim()) throw new Error("Saved Codex session ID is invalid");
+  if (typeof expectedTurnId !== "string" || !expectedTurnId.trim()) throw new Error("Active Codex turn ID is invalid");
+  if (clientUserMessageId !== null && clientUserMessageId !== undefined
+    && (typeof clientUserMessageId !== "string" || !clientUserMessageId.trim() || clientUserMessageId.length > 200)) {
+    throw new Error("Discord message ID is invalid");
+  }
+  return compactObject({
+    threadId,
+    expectedTurnId,
+    input: [{ type: "text", text: validatePrompt(prompt) }, ...imageInputs(imageUrls)],
+    clientUserMessageId: clientUserMessageId?.trim() || null
+  });
+}
+
 export function approvalResponse(approval, choice) {
   if (!approval || typeof approval !== "object") throw new Error("Approval request is invalid");
   if (approval.kind === "command" || approval.kind === "file-change") {
@@ -243,6 +263,31 @@ export class CodexRunner {
   approveAll(key, requestId) {
     const run = this.#runs.get(key);
     return run?.approveAll(requestId) ?? false;
+  }
+
+  /**
+   * Appends user input to the single turn already in progress for this
+   * workspace session. Calls made while turn/start is still resolving are
+   * held by the run and sent in arrival order once its IDs are known.
+   */
+  async steer(key, { prompt, imageUrls = [], clientUserMessageId = null } = {}) {
+    const safePrompt = validatePrompt(prompt);
+    const safeImageUrls = imageInputs(imageUrls).map((image) => image.url);
+    const safeClientUserMessageId = clientUserMessageId === null || clientUserMessageId === undefined
+      ? null
+      : (() => {
+        if (typeof clientUserMessageId !== "string" || !clientUserMessageId.trim() || clientUserMessageId.length > 200) {
+          throw new Error("Discord message ID is invalid");
+        }
+        return clientUserMessageId.trim();
+      })();
+    const run = this.#runs.get(key);
+    if (!run) throw new Error("No active Codex turn is available to steer.");
+    return await run.steer({
+      prompt: safePrompt,
+      imageUrls: safeImageUrls,
+      clientUserMessageId: safeClientUserMessageId
+    });
   }
 
   /**
@@ -530,6 +575,8 @@ export class CodexRunner {
       const requests = new Map();
       const pendingApprovals = new Map();
       const sessionWrites = [];
+      const pendingSteers = [];
+      let steeringInFlight = false;
 
       const send = (message) => {
         if (child.stdin.destroyed || child.killed) return false;
@@ -549,11 +596,70 @@ export class CodexRunner {
       const safeProgress = (event) => {
         Promise.resolve(onProgress(event)).catch(() => {});
       };
+      const steeringUnavailable = (detail = "Codex completed before the steering message could be applied.") => (
+        new Error(`Codex task is no longer accepting steering input: ${detail}`)
+      );
+      const rejectPendingSteers = (error = steeringUnavailable()) => {
+        while (pendingSteers.length > 0) {
+          const pending = pendingSteers.shift();
+          if (!pending.settled) {
+            pending.settled = true;
+            pending.reject(error);
+          }
+        }
+      };
+      const flushSteers = () => {
+        if (settled || steeringInFlight || !threadId || !turnId || pendingSteers.length === 0) return;
+        const pending = pendingSteers[0];
+        steeringInFlight = true;
+        try {
+          request("turn/steer", turnSteerParams({
+            threadId,
+            expectedTurnId: turnId,
+            prompt: pending.prompt,
+            imageUrls: pending.imageUrls,
+            clientUserMessageId: pending.clientUserMessageId
+          }), (message) => {
+            steeringInFlight = false;
+            if (pendingSteers[0] === pending) pendingSteers.shift();
+            if (pending.settled) return;
+            pending.settled = true;
+            if (message.error) {
+              pending.reject(steeringUnavailable(rpcError(message).message));
+            } else {
+              const acceptedTurnId = message.result?.turnId;
+              if (typeof acceptedTurnId !== "string" || acceptedTurnId !== turnId) {
+                pending.reject(steeringUnavailable("Codex App Server did not confirm the active turn."));
+              } else {
+                pending.resolve(Object.freeze({ threadId, turnId: acceptedTurnId }));
+              }
+            }
+            flushSteers();
+          });
+        } catch (error) {
+          steeringInFlight = false;
+          if (pendingSteers[0] === pending) pendingSteers.shift();
+          if (!pending.settled) {
+            pending.settled = true;
+            pending.reject(steeringUnavailable(error instanceof Error ? error.message : String(error)));
+          }
+          flushSteers();
+        }
+      };
+      const enqueueSteer = (input) => new Promise((resolve, reject) => {
+        if (settled) {
+          reject(steeringUnavailable());
+          return;
+        }
+        pendingSteers.push({ ...input, resolve, reject, settled: false });
+        flushSteers();
+      });
       const finish = async (result) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         this.#runs.delete(key);
+        rejectPendingSteers();
         if (!child.killed) child.kill("SIGTERM");
         try {
           await Promise.all(sessionWrites);
@@ -567,6 +673,7 @@ export class CodexRunner {
         settled = true;
         clearTimeout(timer);
         this.#runs.delete(key);
+        rejectPendingSteers(steeringUnavailable(error instanceof Error ? error.message : String(error)));
         if (!child.killed) child.kill("SIGTERM");
         reject(error);
       };
@@ -593,7 +700,13 @@ export class CodexRunner {
             fail(rpcError(message));
             return;
           }
-          turnId = message.result?.turn?.id ?? null;
+          const resolvedTurnId = message.result?.turn?.id;
+          if (typeof resolvedTurnId !== "string" || !resolvedTurnId) {
+            fail(new Error("Codex App Server did not return an active turn ID"));
+            return;
+          }
+          turnId = resolvedTurnId;
+          flushSteers();
         });
       };
       const startNewThread = () => {
@@ -678,7 +791,7 @@ export class CodexRunner {
           child.kill("SIGTERM");
         }
       };
-      const run = { cancel, approve: respondApproval, approveAll: enableAutoApproval };
+      const run = { cancel, approve: respondApproval, approveAll: enableAutoApproval, steer: enqueueSteer };
       this.#runs.set(key, run);
       const timer = this.#maxRuntimeMs > 0
         ? setTimeout(() => {
@@ -721,6 +834,14 @@ export class CodexRunner {
           return;
         }
         if (typeof message?.method === "string") {
+          if (message.method === "turn/started") {
+            const notifiedThreadId = message.params?.threadId ?? message.params?.turn?.threadId;
+            const notifiedTurnId = message.params?.turn?.id ?? message.params?.turnId;
+            if ((!notifiedThreadId || notifiedThreadId === threadId) && typeof notifiedTurnId === "string" && notifiedTurnId) {
+              turnId = notifiedTurnId;
+              flushSteers();
+            }
+          }
           safeProgress(message);
           if (message.method === "item/completed") {
             const item = message.params?.item;
