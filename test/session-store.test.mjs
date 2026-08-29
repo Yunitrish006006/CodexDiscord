@@ -3,7 +3,19 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { SessionStore } from "../src/session-store.mjs";
+import { sessionKey, SessionStore, taskKey } from "../src/session-store.mjs";
+
+test("active task locks span Discord threads without merging saved sessions", () => {
+  assert.equal(
+    taskKey({ userId: "user", channelId: "thread-a", workspace: "core" }),
+    taskKey({ userId: "user", channelId: "thread-b", workspace: "core" })
+  );
+  assert.notEqual(taskKey({ userId: "user", workspace: "core" }), taskKey({ userId: "user", workspace: "nexus" }));
+  assert.notEqual(
+    sessionKey({ userId: "user", channelId: "thread-a", workspace: "core" }),
+    sessionKey({ userId: "user", channelId: "thread-b", workspace: "core" })
+  );
+});
 
 test("the selected reasoning depth survives a bot restart", async () => {
   const stateDir = await mkdtemp(path.join(tmpdir(), "codex-discord-session-"));

@@ -25,6 +25,8 @@ delivery from overwriting or intercepting each other.
 - A Discord conversation stores a separate local Codex session per
   user/channel/workspace. It does **not** attach to an already-open Codex app
   conversation.
+- Active work is locked per user/workspace across Discord threads. A second
+  thread cannot start a conflicting task until the first finishes or is cancelled.
 
 ## Setup
 

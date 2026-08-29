@@ -5,6 +5,11 @@ export function sessionKey({ userId, channelId, workspace }) {
   return `${userId}:${channelId}:${workspace}`;
 }
 
+/** Locks active work per user/workspace, independent of the Discord thread. */
+export function taskKey({ userId, workspace }) {
+  return `${userId}:${workspace}`;
+}
+
 export function conversationKey({ userId, channelId }) {
   return `${userId}:${channelId}`;
 }

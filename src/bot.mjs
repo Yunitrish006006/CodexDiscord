@@ -3,7 +3,7 @@ import { ActionRowBuilder, ActivityType, ButtonBuilder, ButtonStyle, Client, Eve
 import { isAllowedInteraction, isAllowedMessage } from "./config.mjs";
 import { CODING_SUBAGENT_MODEL, validateModel } from "./codex-runner.mjs";
 import { discordOutputImages } from "./output-images.mjs";
-import { conversationKey, sessionKey } from "./session-store.mjs";
+import { conversationKey, sessionKey, taskKey } from "./session-store.mjs";
 
 const MAX_DISCORD_MESSAGE = 1_850;
 const PROGRESS_EDIT_INTERVAL_MS = 1_200;
@@ -220,6 +220,10 @@ export async function statusChunks(status, message, files = []) {
   try {
     await status.edit({ content: first, components: [], files, allowedMentions: { parse: [] } });
   } catch (error) {
+    if (error?.code === 10_008 || error?.rawError?.code === 10_008) {
+      console.warn("Discord status message no longer exists; skipping its final update.");
+      return false;
+    }
     if (files.length === 0) throw error;
     const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.warn(`Discord attachment upload failed for ${files.length} file(s): ${detail}`);
@@ -229,10 +233,18 @@ export async function statusChunks(status, message, files = []) {
   for (const chunk of rest) {
     await status.channel.send({ content: chunk, allowedMentions: { parse: [] } });
   }
+  return true;
 }
 
-async function messageChunks(status, content, files = []) {
-  await statusChunks(status, content, files);
+/** Keeps a Discord delivery failure from terminating the Gateway event loop. */
+export async function safeStatusChunks(status, content, files = []) {
+  try {
+    return await statusChunks(status, content, files);
+  } catch (error) {
+    const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.error(`Could not update the Discord status message: ${detail}`);
+    return false;
+  }
 }
 
 async function completedTaskPayload(result, workspace) {
@@ -732,10 +744,11 @@ async function acknowledgeSteering(message) {
 async function runTask({ config, runner, sessions, userId, channelId, workspaceName, task, model = null, reasoningEffort = null, imageUrls = [], onProgress = () => {}, onApproval = () => {} }) {
   const workspaceConfig = config.workspaces.get(workspaceName);
   if (!workspaceConfig) throw new Error("That workspace is not configured");
-  const key = sessionKey({ userId, channelId, workspace: workspaceName });
-  const saved = sessions.get(key);
+  const savedKey = sessionKey({ userId, channelId, workspace: workspaceName });
+  const activeKey = taskKey({ userId, workspace: workspaceName });
+  const saved = sessions.get(savedKey);
   const result = await runner.execute({
-    key,
+    key: activeKey,
     workspace: workspaceConfig.path,
     prompt: task,
     model,
@@ -744,15 +757,15 @@ async function runTask({ config, runner, sessions, userId, channelId, workspaceN
     skipGitRepoCheck: workspaceConfig.allowNonGit,
     resumeSessionId: saved?.sessionId ?? null,
     onSessionId: async (sessionId) => {
-      await sessions.set(key, { sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
+      await sessions.set(savedKey, { sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
     },
     onProgress,
     onApproval
   });
   if (result.sessionId && result.sessionId !== saved?.sessionId) {
-    await sessions.set(key, { sessionId: result.sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
+    await sessions.set(savedKey, { sessionId: result.sessionId, workspace: workspaceName, updatedAt: new Date().toISOString() });
   }
-  return { key, result };
+  return { key: activeKey, result };
 }
 
 export async function registerCommands(config) {
@@ -946,7 +959,8 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       await interaction.reply({ content: "That workspace is not configured.", ephemeral: true, allowedMentions: { parse: [] } });
       return;
     }
-    const key = sessionKey({ userId: interaction.user.id, channelId: interaction.channelId, workspace: workspaceName });
+    const savedKey = sessionKey({ userId: interaction.user.id, channelId: interaction.channelId, workspace: workspaceName });
+    const activeKey = taskKey({ userId: interaction.user.id, workspace: workspaceName });
     let status = null;
     let task = "";
     let taskStarted = false;
@@ -954,8 +968,8 @@ export async function startBot({ config, runner, sessions, models = [] }) {
     let activeTask = null;
     try {
       if (action === "status") {
-        const saved = sessions.get(key);
-        const state = runner.isRunning(key) ? "running" : saved ? "ready to resume" : "new";
+        const saved = sessions.get(savedKey);
+        const state = runner.isRunning(activeKey) ? "running" : saved ? "ready to resume" : "new";
         const model = sessions.activeModel(conversation) ?? "local default";
         const reasoningEffort = reasoningLabel(sessions.activeReasoningEffort(conversation));
         const progressLines = sessions.progressLineCount(conversation) ?? DEFAULT_CLI_PROGRESS_LINES;
@@ -963,13 +977,13 @@ export async function startBot({ config, runner, sessions, models = [] }) {
         return;
       }
       if (action === "cancel") {
-        const stopped = runner.cancel(key);
+        const stopped = runner.cancel(activeKey);
         await interaction.reply({ content: stopped ? "Sent a stop request to your active Codex task." : "No active Codex task for this workspace.", ephemeral: true, allowedMentions: { parse: [] } });
         return;
       }
       if (action === "reset") {
-        if (runner.isRunning(key)) throw new Error("Cancel the active task before resetting its session");
-        const deleted = await sessions.delete(key);
+        if (runner.isRunning(activeKey)) throw new Error("Cancel the active task before resetting its session");
+        const deleted = await sessions.delete(savedKey);
         await interaction.reply({ content: deleted ? "Saved Codex session mapping removed." : "No saved Codex session mapping exists.", ephemeral: true, allowedMentions: { parse: [] } });
         return;
       }
@@ -984,6 +998,14 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       const activeModel = activeCatalogModel(model, models);
       const attachment = interaction.options.getAttachment("image", false);
       const imageUrls = imageUrlsForAttachments(attachment ? [attachment] : [], activeModel);
+      if (runner.isRunning(activeKey)) {
+        await interaction.reply({
+          content: "Codex is already working on this workspace in another Discord thread. Reply to that task's status card to steer it, or use `/codex cancel` first.",
+          ephemeral: true,
+          allowedMentions: { parse: [] }
+        });
+        return;
+      }
       // Interaction webhooks expire, while a normal bot message can carry a
       // long-running approval card and receive the final result safely.
       await interaction.deferReply();
@@ -1001,7 +1023,8 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       });
       taskStarted = true;
       activeTask = {
-        key,
+        key: activeKey,
+        mapKey: savedKey,
         userId: interaction.user.id,
         channelId: interaction.channelId,
         workspaceName,
@@ -1009,34 +1032,34 @@ export async function startBot({ config, runner, sessions, models = [] }) {
         progress,
         model: activeModel
       };
-      activeTasks.set(key, activeTask);
+      activeTasks.set(savedKey, activeTask);
       const { result } = await runTask({
         config, runner, sessions, userId: interaction.user.id, channelId: interaction.channelId, workspaceName, task,
         model,
         reasoningEffort,
         imageUrls,
         onProgress: async (event) => {
-          if (event?.method === "serverRequest/resolved") await resolveApproval(key, event.params?.requestId);
+          if (event?.method === "serverRequest/resolved") await resolveApproval(activeKey, event.params?.requestId);
           progress.update(event);
         },
         onApproval: async (approval) => {
-          const token = registerApproval({ approval, key, userId: interaction.user.id, channelId: interaction.channelId, progress });
+          const token = registerApproval({ approval, key: activeKey, userId: interaction.user.id, channelId: interaction.channelId, progress });
           await progress.requestApproval(approval, approvalComponents(token, approval));
         }
       });
       const retainedProgress = await progress.finish();
       const output = await completedTaskPayload(result, workspaceConfig.path);
-      await statusChunks(status, `${formatQuestionResult(task, result, retainedProgress)}${output.warning}`, output.files);
+      await safeStatusChunks(status, `${formatQuestionResult(task, result, retainedProgress)}${output.warning}`, output.files);
     } catch (error) {
       const message = `Codex request failed: ${error.message}`;
       if (status) {
         const retainedProgress = progress ? await progress.finish() : [];
-        await statusChunks(status, formatQuestionResult(task, { exitCode: 1, message }, retainedProgress));
+        await safeStatusChunks(status, formatQuestionResult(task, { exitCode: 1, message }, retainedProgress));
       }
       else if (interaction.deferred || interaction.replied) await interaction.editReply({ content: message, allowedMentions: { parse: [] } });
       else await interaction.reply({ content: message, ephemeral: true, allowedMentions: { parse: [] } });
     } finally {
-      if (activeTask && activeTasks.get(activeTask.key) === activeTask) activeTasks.delete(activeTask.key);
+      if (activeTask && activeTasks.get(activeTask.mapKey) === activeTask) activeTasks.delete(activeTask.mapKey);
       if (taskStarted) void refreshUsagePresence();
     }
   });
@@ -1084,9 +1107,10 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       await message.reply({ content: `Codex image upload failed: ${error.message}`, allowedMentions: { parse: [] } });
       return;
     }
-    const key = sessionKey({ userId: message.author.id, channelId: message.channelId, workspace: workspaceName });
-    if (runner.isRunning(key)) {
-      await message.reply({ content: "Codex is still working on the previous message. Use `/codex cancel` if needed.", allowedMentions: { parse: [] } });
+    const savedKey = sessionKey({ userId: message.author.id, channelId: message.channelId, workspace: workspaceName });
+    const activeKey = taskKey({ userId: message.author.id, workspace: workspaceName });
+    if (runner.isRunning(activeKey)) {
+      await message.reply({ content: "Codex is already working on this workspace, possibly in another Discord thread. Reply to that task's status card to steer it, or use `/codex cancel` first.", allowedMentions: { parse: [] } });
       return;
     }
     const modelLabel = model ?? "local default";
@@ -1102,7 +1126,8 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       edit: (payload) => status.edit(payload)
     });
     const activeTask = {
-      key,
+      key: activeKey,
+      mapKey: savedKey,
       userId: message.author.id,
       channelId: message.channelId,
       workspaceName,
@@ -1110,28 +1135,28 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       progress,
       model: activeCatalogModel(model, models)
     };
-    activeTasks.set(key, activeTask);
+    activeTasks.set(savedKey, activeTask);
     try {
       const { result } = await runTask({
         config, runner, sessions, userId: message.author.id, channelId: message.channelId, workspaceName, task, model, reasoningEffort, imageUrls,
         onProgress: async (event) => {
-          if (event?.method === "serverRequest/resolved") await resolveApproval(key, event.params?.requestId);
+          if (event?.method === "serverRequest/resolved") await resolveApproval(activeKey, event.params?.requestId);
           progress.update(event);
         },
         onApproval: async (approval) => {
-          const token = registerApproval({ approval, key, userId: message.author.id, channelId: message.channelId, progress });
+          const token = registerApproval({ approval, key: activeKey, userId: message.author.id, channelId: message.channelId, progress });
           await progress.requestApproval(approval, approvalComponents(token, approval));
         }
       });
       const retainedProgress = await progress.finish();
       const output = await completedTaskPayload(result, workspaceConfig.path);
-      await messageChunks(status, `${formatQuestionResult(task, result, retainedProgress)}${output.warning}`, output.files);
+      await safeStatusChunks(status, `${formatQuestionResult(task, result, retainedProgress)}${output.warning}`, output.files);
     } catch (error) {
       const retainedProgress = await progress.finish();
-      await messageChunks(status,
+      await safeStatusChunks(status,
         formatQuestionResult(task, { exitCode: 1, message: `Codex request failed: ${error.message}` }, retainedProgress));
     } finally {
-      if (activeTasks.get(key) === activeTask) activeTasks.delete(key);
+      if (activeTasks.get(savedKey) === activeTask) activeTasks.delete(savedKey);
       void refreshUsagePresence();
     }
   });

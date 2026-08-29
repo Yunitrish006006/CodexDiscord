@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { approvalResponse, CODING_SUBAGENT_MODEL, CodexRunner, finalAgentMessage, generatedImagePaths, imageInputs, isAutoApprovedGradleCompile, threadResumeParams, threadStartParams, turnStartParams, turnSteerParams, validateModel, validatePrompt, validateReasoningEffort } from "../src/codex-runner.mjs";
+import { taskKey } from "../src/session-store.mjs";
 
 test("Codex App Server sessions always confine writes to the selected workspace", () => {
   const start = threadStartParams({ workspace: "/srv/nexus", model: "gpt-5.6-terra" });
@@ -291,6 +292,34 @@ test("zero max runtime leaves a Codex task running until it completes", async ()
   assert.equal(result.exitCode, 0);
   assert.equal(result.timedOut, false);
   assert.equal(result.message, "Completed without a deadline.");
+});
+
+test("one active task key blocks a second Discord thread for the same workspace", async () => {
+  let started;
+  const turnStarted = new Promise((resolve) => { started = resolve; });
+  const child = new FakeAppServer((request, respond, notify) => {
+    if (request.method === "initialize") respond({ id: request.id, result: {} });
+    else if (request.method === "thread/start") respond({ id: request.id, result: { thread: { id: "locked-thread" } } });
+    else if (request.method === "turn/start") {
+      respond({ id: request.id, result: { turn: { id: "locked-turn" } } });
+      started();
+    } else if (request.method === "turn/interrupt") {
+      respond({ id: request.id, result: {} });
+      notify({ method: "turn/completed", params: { turn: { status: "interrupted", items: [] } } });
+    }
+  });
+  const runner = new CodexRunner({ maxRuntimeMs: 0, spawnImpl: () => child });
+  const firstThreadKey = taskKey({ userId: "user", channelId: "discord-thread-a", workspace: "core" });
+  const secondThreadKey = taskKey({ userId: "user", channelId: "discord-thread-b", workspace: "core" });
+  const first = runner.execute({ key: firstThreadKey, workspace: "/srv/core", prompt: "Keep working" });
+
+  await turnStarted;
+  await assert.rejects(
+    runner.execute({ key: secondThreadKey, workspace: "/srv/core", prompt: "Start conflicting work" }),
+    /already running/
+  );
+  runner.cancel(firstThreadKey);
+  await first;
 });
 
 test("steering uses the active turn IDs, image input, and FIFO request order", async () => {

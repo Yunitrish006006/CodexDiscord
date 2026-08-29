@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyUsagePresence, approvalComponents, commandDefinition, createProgressReporter, formatQuestionResult, formatUsageResult, imageUrlsForAttachments, isReplyToActiveStatus, modelAutocompleteChoices, reasoningAutocompleteChoices, statusChunks, usagePresenceText } from "../src/bot.mjs";
+import { applyUsagePresence, approvalComponents, commandDefinition, createProgressReporter, formatQuestionResult, formatUsageResult, imageUrlsForAttachments, isReplyToActiveStatus, modelAutocompleteChoices, reasoningAutocompleteChoices, safeStatusChunks, statusChunks, usagePresenceText } from "../src/bot.mjs";
 
 test("progress cards show sanitized CLI-style activity as Discord subtext", async () => {
   const edits = [];
@@ -300,6 +300,31 @@ test("output attachment failures preserve the final text and explain the missing
   assert.match(edits[1].content, /Codex finished/);
   assert.match(edits[1].content, /Attach Files/);
   assert.deepEqual(warnings, ["Discord attachment upload failed for 1 file(s): Error: Missing Permissions"]);
+});
+
+test("a deleted Discord status message cannot crash task cleanup", async () => {
+  let edits = 0;
+  let sends = 0;
+  const missing = Object.assign(new Error("Unknown Message"), { code: 10_008 });
+  const status = {
+    edit: async () => {
+      edits += 1;
+      throw missing;
+    },
+    channel: { send: async () => { sends += 1; } }
+  };
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(message);
+  try {
+    assert.equal(await safeStatusChunks(status, "Codex finished."), false);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(edits, 1);
+  assert.equal(sends, 0);
+  assert.deepEqual(warnings, ["Discord status message no longer exists; skipping its final update."]);
 });
 
 test("usage results show remaining quota and Discord reset times without account details", () => {
