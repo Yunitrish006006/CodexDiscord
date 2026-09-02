@@ -93,13 +93,16 @@ Discord user and channel.
   response is visible only to the caller. The Bot's Discord activity also shows
   a compact remaining-usage summary; it refreshes at startup, after each Codex
   task finishes, and whenever `/codex usage` is queried.
-- Requests that create or modify source code, tests, scripts, build files, or
-  code-related configuration are coordinated by the selected primary model but
-  implemented first by a `gpt-5.3-codex-spark` subagent at medium reasoning.
-  The primary waits for the subagent, reviews its changes and verification, and
-  makes only necessary follow-up corrections. Read-only questions and ordinary
-  explanations stay on the primary model. This routing is attached only to
-  CodexDiscord threads and does not change the host's global Codex model.
+- CodexDiscord now gives the selected primary model an adaptive orchestration
+  policy instead of forcing every coding request through exactly one worker.
+  The primary may work directly on trivial isolated changes, use explorers for
+  read-heavy investigation, use architecture/core specialists for shared APIs
+  and cross-module contracts, fan independent modules out to bounded workers,
+  and request an independent integration review for substantial changes.
+  Minecraft/Fabric work additionally checks configured versions, mappings,
+  module consumers, Gradle validation, and client/dedicated-server boundaries.
+  `gpt-5.3-codex-spark` at medium reasoning remains the preferred implementation
+  worker when available, but it is no longer the only allowed delegation shape.
 - Attach a PNG, JPEG, WebP, or GIF to an ordinary message and Codex receives it
   as visual context; a message containing only an image asks Codex to inspect
   it. `/codex run` also accepts one optional `image` attachment. Up to four
