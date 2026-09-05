@@ -20,6 +20,18 @@ test("configuration requires explicit user, channel and workspace allowlists", (
   assert.equal(config.maxRuntimeMs, 0);
   assert.equal(loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "0" }).maxRuntimeMs, 0);
   assert.equal(loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "6000" }).maxRuntimeMs, 6_000_000);
+  const sync = loadConfig({
+    ...env,
+    TOTEM_WORKSPACE_SYNC_URL: "http://127.0.0.1:18765/",
+    TOTEM_WORKSPACE_SYNC_TOKEN: "a-long-private-sync-token",
+    TOTEM_WORKSPACE_SYNC_CHANNEL_ID: "423456789012345678"
+  }).workspaceSync;
+  assert.deepEqual(sync, {
+    url: "http://127.0.0.1:18765/",
+    token: "a-long-private-sync-token",
+    channelId: "423456789012345678",
+    workspaceName: "workspace"
+  });
   assert.throws(() => loadConfig({ ...env, DISCORD_ALLOWED_USER_IDS: "" }), /DISCORD_ALLOWED_USER_IDS is required/);
   assert.throws(() => loadConfig({ ...env, CODEX_WORKSPACES_JSON: '{"bad":"relative"}' }), /absolute path/);
   assert.throws(() => loadConfig({ ...env, DISCORD_GUILD_ID: "not-an-id" }), /snowflake/);
@@ -29,6 +41,13 @@ test("configuration requires explicit user, channel and workspace allowlists", (
   );
   assert.throws(() => loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "1" }), /0 \(unlimited\) or an integer from 30 to 7200/);
   assert.throws(() => loadConfig({ ...env, CODEX_MAX_RUNTIME_SECONDS: "7201" }), /0 \(unlimited\) or an integer from 30 to 7200/);
+  assert.throws(() => loadConfig({ ...env, TOTEM_WORKSPACE_SYNC_URL: "https://example.com" }), /configured together/);
+  assert.throws(() => loadConfig({
+    ...env,
+    TOTEM_WORKSPACE_SYNC_URL: "http://example.com",
+    TOTEM_WORKSPACE_SYNC_TOKEN: "a-long-private-sync-token",
+    TOTEM_WORKSPACE_SYNC_CHANNEL_ID: "423456789012345678"
+  }), /loopback host/);
 });
 
 test("access requires both the configured user and channel", () => {

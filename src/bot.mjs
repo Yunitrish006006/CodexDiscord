@@ -4,6 +4,7 @@ import { isAllowedInteraction, isAllowedMessage } from "./config.mjs";
 import { CODING_SUBAGENT_MODEL, validateModel } from "./codex-runner.mjs";
 import { discordOutputImages } from "./output-images.mjs";
 import { conversationKey, sessionKey, taskKey } from "./session-store.mjs";
+import { createWorkspaceSync } from "./workspace-sync.mjs";
 
 const MAX_DISCORD_MESSAGE = 1_850;
 const PROGRESS_EDIT_INTERVAL_MS = 1_200;
@@ -778,6 +779,7 @@ export async function registerCommands(config) {
 export async function startBot({ config, runner, sessions, models = [] }) {
   const approvals = new Map();
   const activeTasks = new Map();
+  const workspaceSync = createWorkspaceSync({ config });
   const catalogWorkspace = config.workspaces.values().next().value;
   let usagePresenceRefresh = Promise.resolve();
   const refreshUsagePresence = () => {
@@ -819,6 +821,7 @@ export async function startBot({ config, runner, sessions, models = [] }) {
   client.once(Events.ClientReady, (readyClient) => {
     console.info(`CodexDiscord ready as ${readyClient.user.tag}`);
     void refreshUsagePresence();
+    void workspaceSync.start(readyClient);
   });
   client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isAutocomplete()) {
@@ -968,6 +971,16 @@ export async function startBot({ config, runner, sessions, models = [] }) {
     let activeTask = null;
     try {
       if (action === "status") {
+        if (workspaceSync.handlesWorkspace(workspaceName)) {
+          try {
+            const shared = await workspaceSync.status();
+            const state = shared.busy ? `running (${shared.currentTask?.id ?? "task"})` : shared.available ? "idle" : "adapter unavailable";
+            await interaction.reply({ content: `Shared TotemWorkspace Codex queue: ${state}.`, ephemeral: true, allowedMentions: { parse: [] } });
+          } catch (error) {
+            await interaction.reply({ content: `Could not query the shared TotemWorkspace queue: ${error.message}`, ephemeral: true, allowedMentions: { parse: [] } });
+          }
+          return;
+        }
         const saved = sessions.get(savedKey);
         const state = runner.isRunning(activeKey) ? "running" : saved ? "ready to resume" : "new";
         const model = sessions.activeModel(conversation) ?? "local default";
@@ -977,6 +990,21 @@ export async function startBot({ config, runner, sessions, models = [] }) {
         return;
       }
       if (action === "cancel") {
+        if (workspaceSync.handlesWorkspace(workspaceName)) {
+          try {
+            const result = await workspaceSync.cancel();
+            await interaction.reply({
+              content: result.status === "cancelling"
+                ? "Sent a cancellation request to the shared TotemWorkspace Codex task."
+                : "The shared TotemWorkspace Codex queue is already idle.",
+              ephemeral: true,
+              allowedMentions: { parse: [] }
+            });
+          } catch (error) {
+            await interaction.reply({ content: `Could not cancel the shared TotemWorkspace task: ${error.message}`, ephemeral: true, allowedMentions: { parse: [] } });
+          }
+          return;
+        }
         const stopped = runner.cancel(activeKey);
         await interaction.reply({ content: stopped ? "Sent a stop request to your active Codex task." : "No active Codex task for this workspace.", ephemeral: true, allowedMentions: { parse: [] } });
         return;
@@ -994,6 +1022,29 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       }
 
       task = interaction.options.getString("task", true);
+      if (workspaceSync.handlesWorkspace(workspaceName)) {
+        if (interaction.options.getAttachment("image", false)) {
+          await interaction.reply({
+            content: "The shared TotemWorkspace prompt channel currently accepts text only.",
+            ephemeral: true,
+            allowedMentions: { parse: [] }
+          });
+          return;
+        }
+        await interaction.deferReply();
+        status = await interaction.fetchReply();
+        const relay = await workspaceSync.submitPrompt({
+          prompt: task,
+          clientMessageId: `interaction:${interaction.id}`
+        });
+        await status.edit({
+          content: relay.execution === "codex"
+            ? "Prompt sent to the shared TotemWorkspace Codex queue. Progress is mirrored below."
+            : "Prompt was recorded by TotemWorkspace; check the mirrored status for its execution state.",
+          allowedMentions: { parse: [] }
+        });
+        return;
+      }
       const model = sessions.activeModel(conversation);
       const activeModel = activeCatalogModel(model, models);
       const attachment = interaction.options.getAttachment("image", false);
@@ -1098,6 +1149,31 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       await message.reply({ content: "No active workspace is configured. Use `/codex use` once.", allowedMentions: { parse: [] } });
       return;
     }
+    const task = message.content.trim() || "請檢視我上傳的圖片，說明你看到的內容並依此處理。";
+    if (workspaceSync.handlesWorkspace(workspaceName)) {
+      if (message.attachments.size > 0) {
+        await message.reply({
+          content: "The shared TotemWorkspace prompt channel currently accepts text only.",
+          allowedMentions: { parse: [] }
+        });
+        return;
+      }
+      try {
+        const relay = await workspaceSync.submitPrompt({ prompt: task, clientMessageId: message.id });
+        await message.reply({
+          content: relay.execution === "codex"
+            ? "已送到共用 TotemWorkspace Codex 佇列；處理進度會同步到這裡與網頁。"
+            : "Prompt 已由 TotemWorkspace 記錄；請查看同步狀態。",
+          allowedMentions: { parse: [] }
+        });
+      } catch (error) {
+        await message.reply({
+          content: `無法送到 TotemWorkspace：${error.message}`,
+          allowedMentions: { parse: [] }
+        });
+      }
+      return;
+    }
     const model = sessions.activeModel(conversation);
     const reasoningEffort = sessions.activeReasoningEffort(conversation);
     let imageUrls;
@@ -1114,7 +1190,6 @@ export async function startBot({ config, runner, sessions, models = [] }) {
       return;
     }
     const modelLabel = model ?? "local default";
-    const task = message.content.trim() || "請檢視我上傳的圖片，說明你看到的內容並依此處理。";
     const status = await message.reply({ content: `Codex is working in **${workspaceName}** with **${modelLabel}** at **${reasoningLabel(reasoningEffort)}** reasoning depth${imageUrls.length ? ` and ${imageUrls.length} image(s)` : ""}…`, allowedMentions: { parse: [] } });
     const progress = createProgressReporter({
       workspaceName,
