@@ -65,6 +65,36 @@ function runtimeSeconds(env) {
   return seconds;
 }
 
+function workspaceSync(env, allowedChannelIds) {
+  const urlValue = env.TOTEM_WORKSPACE_SYNC_URL?.trim();
+  const token = env.TOTEM_WORKSPACE_SYNC_TOKEN?.trim();
+  const channelId = env.TOTEM_WORKSPACE_SYNC_CHANNEL_ID?.trim();
+  const workspaceName = env.TOTEM_WORKSPACE_SYNC_WORKSPACE?.trim() || "workspace";
+  if (!urlValue && !token && !channelId && !env.TOTEM_WORKSPACE_SYNC_WORKSPACE?.trim()) return null;
+  if (!urlValue || !token || !channelId) {
+    throw new Error("TOTEM_WORKSPACE_SYNC_URL, TOTEM_WORKSPACE_SYNC_TOKEN, and TOTEM_WORKSPACE_SYNC_CHANNEL_ID must be configured together");
+  }
+  if (!DISCORD_ID.test(channelId) || !allowedChannelIds.has(channelId)) {
+    throw new Error("TOTEM_WORKSPACE_SYNC_CHANNEL_ID must be an allowed Discord channel ID");
+  }
+  if (!WORKSPACE_NAME.test(workspaceName)) throw new Error("TOTEM_WORKSPACE_SYNC_WORKSPACE must be a configured workspace name");
+  let url;
+  try {
+    url = new URL(urlValue);
+  } catch {
+    throw new Error("TOTEM_WORKSPACE_SYNC_URL must be a valid URL");
+  }
+  const loopback = url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]", "::1"].includes(url.hostname);
+  if (!loopback) throw new Error("TOTEM_WORKSPACE_SYNC_URL must use an http loopback host");
+  if (token.length < 16) throw new Error("TOTEM_WORKSPACE_SYNC_TOKEN must contain at least 16 characters");
+  return Object.freeze({
+    url: url.toString(),
+    token,
+    channelId,
+    workspaceName
+  });
+}
+
 export function loadConfig(env = process.env) {
   const applicationId = required(env, "DISCORD_APPLICATION_ID");
   const bridgeApplicationId = required(env, "DISCORD_BRIDGE_APPLICATION_ID");
@@ -75,16 +105,24 @@ export function loadConfig(env = process.env) {
   if (applicationId === bridgeApplicationId) {
     throw new Error("Discord Codex must use a different Application than the Minecraft Discord Bridge");
   }
+  const allowedUserIds = idSet(env, "DISCORD_ALLOWED_USER_IDS");
+  const allowedChannelIds = idSet(env, "DISCORD_ALLOWED_CHANNEL_IDS");
+  const workspaces = workspaceMap(env);
+  const sync = workspaceSync(env, allowedChannelIds);
+  if (sync && !workspaces.has(sync.workspaceName)) {
+    throw new Error("TOTEM_WORKSPACE_SYNC_WORKSPACE must name a configured workspace");
+  }
   return Object.freeze({
     botToken: required(env, "DISCORD_BOT_TOKEN"),
     applicationId,
     bridgeApplicationId,
     guildId,
-    allowedUserIds: idSet(env, "DISCORD_ALLOWED_USER_IDS"),
-    allowedChannelIds: idSet(env, "DISCORD_ALLOWED_CHANNEL_IDS"),
-    workspaces: workspaceMap(env),
+    allowedUserIds,
+    allowedChannelIds,
+    workspaces,
     maxRuntimeMs: runtimeSeconds(env) * 1000,
-    stateDir: path.resolve(env.CODEX_STATE_DIR || "data")
+    stateDir: path.resolve(env.CODEX_STATE_DIR || "data"),
+    workspaceSync: sync
   });
 }
 

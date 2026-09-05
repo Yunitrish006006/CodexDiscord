@@ -12,6 +12,13 @@ commands; the Codex application uses the Bot Gateway and owns only `/codex`.
 Keeping separate applications prevents command registration and interaction
 delivery from overwriting or intercepting each other.
 
+When the optional TotemWorkspace conversation sync is configured, CodexDiscord
+becomes the Discord interface for the Workspace Viewer. The selected `workspace`
+messages and `/codex run` calls use the Viewer Bridge's single Codex queue rather
+than starting a second Codex session; sanitized progress and submitted prompts
+are mirrored to both surfaces. Other configured workspaces retain the normal
+CodexDiscord runner and its session/approval behavior.
+
 ## Security model
 
 - Only `DISCORD_ALLOWED_USER_IDS` may use the commands.
@@ -93,13 +100,16 @@ Discord user and channel.
   response is visible only to the caller. The Bot's Discord activity also shows
   a compact remaining-usage summary; it refreshes at startup, after each Codex
   task finishes, and whenever `/codex usage` is queried.
-- Requests that create or modify source code, tests, scripts, build files, or
-  code-related configuration are coordinated by the selected primary model but
-  implemented first by a `gpt-5.3-codex-spark` subagent at medium reasoning.
-  The primary waits for the subagent, reviews its changes and verification, and
-  makes only necessary follow-up corrections. Read-only questions and ordinary
-  explanations stay on the primary model. This routing is attached only to
-  CodexDiscord threads and does not change the host's global Codex model.
+- CodexDiscord now gives the selected primary model an adaptive orchestration
+  policy instead of forcing every coding request through exactly one worker.
+  The primary may work directly on trivial isolated changes, use explorers for
+  read-heavy investigation, use architecture/core specialists for shared APIs
+  and cross-module contracts, fan independent modules out to bounded workers,
+  and request an independent integration review for substantial changes.
+  Minecraft/Fabric work additionally checks configured versions, mappings,
+  module consumers, Gradle validation, and client/dedicated-server boundaries.
+  `gpt-5.3-codex-spark` at medium reasoning remains the preferred implementation
+  worker when available, but it is no longer the only allowed delegation shape.
 - Attach a PNG, JPEG, WebP, or GIF to an ordinary message and Codex receives it
   as visual context; a message containing only an image asks Codex to inspect
   it. `/codex run` also accepts one optional `image` attachment. Up to four
@@ -173,3 +183,23 @@ the configured workspaces are mounted.
 `CODEX_MAX_RUNTIME_SECONDS=0` leaves Codex tasks running until they complete or
 the user cancels them. Set it to 30–7200 only when a finite safety deadline is
 desired.
+
+### Optional TotemWorkspace sync
+
+Set all of the following in the same mode-`0600` environment file as the Bot.
+The channel must already be in `DISCORD_ALLOWED_CHANNEL_IDS`; the URL is
+validated as loopback-only, and the token must be the exact value configured as
+`TOTEM_CONVERSATION_SYNC_TOKEN` for `scripts/serve-local-viewer.mjs`.
+
+```dotenv
+TOTEM_WORKSPACE_SYNC_URL=http://127.0.0.1:18765/
+TOTEM_WORKSPACE_SYNC_TOKEN=replace-with-the-same-long-random-secret
+TOTEM_WORKSPACE_SYNC_CHANNEL_ID=your-allowed-channel-id
+TOTEM_WORKSPACE_SYNC_WORKSPACE=workspace
+```
+
+This relay never exposes the token to the browser and does not persist full
+prompts in TotemWorkspace replay data. Discord cannot expose characters in a
+user's unsubmitted composer, so Discord input is shown in the web transcript
+when the message is sent; browser drafts are mirrored in a throttled Bot-owned
+preview message.
